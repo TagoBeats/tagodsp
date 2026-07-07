@@ -36,14 +36,17 @@ Promote only when all of these hold:
 2. API stable for 2+ weeks
 3. Python golden files exist; the C++ port must match them within tolerance (test lives in `cpp/tests/`)
 
-## Clean-room rule
+## IP rule
 
-Concepts I know from work at NoiseWorks may only enter this library as clean-room reimplementations:
+NoiseWorks approved (verbal OK Moritz, 2026-07-07; get it in writing before going
+public): DSP modules I wrote myself may be ported into this library, and the NW
+library conventions may serve as a model.
 
-1. Write the concept note in `docs/concepts/` first, from memory and public literature, with citations.
-2. Company code stays closed while implementing. No copied names, parameters or defaults.
-3. Own API, own test signals, own defaults.
-4. De-essing-adjacent modules get an explicit OK from NoiseWorks before the repo goes public.
+Hard limits that stay:
+
+1. NW code I did not write myself stays out.
+2. DubCheck core algorithms (QC/artifact detection) stay proprietary.
+3. Ported modules get adapted to this library's API conventions, not pasted verbatim.
 
 ## Versioning
 
