@@ -8,15 +8,20 @@ license = { text = "MIT" }
 authors = [{ name = "Robin Busse" }]
 dependencies = [
     "numpy>=1.26",
+    "scipy>=1.12",
 ]
+
+[project.optional-dependencies]
+voicing = ["librosa>=0.10"]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
     "ruff>=0.4",
-    "scipy>=1.12",
     "soundfile>=0.12",
     "matplotlib>=3.8",
+    "librosa>=0.10",
+    "numba>=0.59",
 ]
 
 [build-system]

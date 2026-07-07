@@ -15,6 +15,12 @@ These rules keep the library consistent. They apply to me first.
 - Lifecycle: `prepare(sampleRate, maxBlockSize)`, `process(...)`, `reset()`.
 - No heap allocation, no exceptions, no locks in the process path.
 
+## Naming
+
+- Files and modules: snake_case (`band_ratio_gate.py`, `event_leveler.py`)
+- Classes: UpperCamelCase (`BandRatioGate`, `EventLeveler`)
+- Tunable parameters live as dataclass fields with validated defaults, never as module-level constants
+
 ## Definition of Done (per module)
 
 1. pytest with analytic expectation or reference signal
