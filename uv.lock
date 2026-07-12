@@ -7,6 +7,12 @@ resolution-markers = [
     "python_full_version < '3.12'",
 ]
 
+[manifest]
+members = [
+    "python-stretch",
+    "tagodsp",
+]
+
 [[package]]
 name = "audioop-lts"
 version = "0.2.2"
@@ -1044,6 +1050,11 @@ wheels = [
 ]
 
 [[package]]
+name = "python-stretch"
+version = "0.3.1"
+source = { editable = "third_party/python-stretch" }
+
+[[package]]
 name = "requests"
 version = "2.34.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1354,6 +1365,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },
+    { name = "python-stretch" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
@@ -1377,6 +1389,7 @@ dev = [
 requires-dist = [
     { name = "librosa", marker = "extra == 'voicing'", specifier = ">=0.10" },
     { name = "numpy", specifier = ">=1.26" },
+    { name = "python-stretch", editable = "third_party/python-stretch" },
     { name = "scipy", specifier = ">=1.12" },
 ]
 provides-extras = ["voicing"]

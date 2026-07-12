@@ -8,6 +8,7 @@ license = { text = "MIT" }
 authors = [{ name = "Robin Busse" }]
 dependencies = [
     "numpy>=1.26",
+    "python-stretch",
     "scipy>=1.12",
 ]
 
@@ -37,6 +38,15 @@ testpaths = ["python/tests"]
 [tool.ruff]
 line-length = 100
 src = ["python"]
+extend-exclude = ["third_party"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "NPY"]
+
+[tool.uv.workspace]
+members = [
+    "third_party/python-stretch",
+]
+
+[tool.uv.sources]
+python-stretch = { workspace = true }
