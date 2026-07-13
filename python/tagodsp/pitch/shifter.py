@@ -23,6 +23,21 @@ except ImportError as e:  # pragma: no cover
         "python-stretch not installed. Run `uv sync` (vendored in third_party/python-stretch)."
     ) from e
 
+# Wet level loss per semitone, measured on the two v1 test vocals (2026-07-13,
+# RMS wet vs dry, mean of male hook and Toms Diner). Index 0 = -12 st, step 1.
+# Compensating the wet path keeps all transpositions at roughly equal loudness;
+# exactly 0 dB at pitch 0 so the neutral setting stays transparent.
+_LEVEL_COMP_DB = (
+    -0.9, -0.2, 0.2, 0.3, 0.6, 0.6, 1.1, 1.3, 1.5, 1.6, 1.6, 1.0, 0.0,
+    1.3, 2.4, 3.1, 3.6, 4.1, 4.6, 4.6, 5.4, 5.8, 6.2, 5.9, 5.4,
+)
+
+
+def _level_comp_db(pitch_semitones: float) -> float:
+    """Linear interpolation into the measured table, clamped to +-12."""
+    p = float(np.clip(pitch_semitones, -12.0, 12.0))
+    return float(np.interp(p, np.arange(-12, 13), _LEVEL_COMP_DB))
+
 
 class PitchShifter:
     """Monophonic/stereo vocal pitcher: pitch, formant, mix (Little-AlterBoy-style).
@@ -43,6 +58,8 @@ class PitchShifter:
         grainy, no regressions on female material or downshifts.
     formant_base_hz : anchor for the engine's envelope estimate. 0 = automatic;
         setting it near the singer's fundamental can improve formant tracking.
+    level_compensation : compensate the measured wet level loss per semitone
+        (see _LEVEL_COMP_DB) so all transpositions sit at similar loudness.
     """
 
     def __init__(
@@ -55,6 +72,7 @@ class PitchShifter:
         preserve_formants: bool = True,
         tonality_limit_hz: float = 12000.0,
         formant_base_hz: float = 0.0,
+        level_compensation: bool = True,
     ):
         if sr <= 0:
             raise ValueError("sr must be > 0")
@@ -66,6 +84,7 @@ class PitchShifter:
         self.preserve_formants = bool(preserve_formants)
         self.tonality_limit_hz = float(tonality_limit_hz)
         self.formant_base_hz = float(formant_base_hz)
+        self.level_compensation = bool(level_compensation)
         self._engine = python_stretch.Signalsmith.Stretch()
         self._channels = 0
 
@@ -123,6 +142,9 @@ class PitchShifter:
         if wet.shape[1] < n:  # guard against off-by-one from the engine's rounding
             wet = np.pad(wet, ((0, 0), (0, n - wet.shape[1])))
         wet = wet[:, :n]
+
+        if self.level_compensation:
+            wet = wet * db_to_lin(_level_comp_db(self.pitch_semitones))
 
         y = (1.0 - self._mix) * buf + self._mix * wet
         y = (y * db_to_lin(self.gain_db)).astype(np.float32)
