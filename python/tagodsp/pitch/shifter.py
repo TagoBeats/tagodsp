@@ -14,6 +14,8 @@ instead.
 
 import numpy as np
 
+from tagodsp.utils.gain import db_to_lin
+
 try:
     import python_stretch
 except ImportError as e:  # pragma: no cover
@@ -31,11 +33,14 @@ class PitchShifter:
     pitch_semitones : transposition, typically -12..+12.
     formant_semitones : formant shift on top of (independent of) the pitch shift.
     mix : dry/wet crossfade 0..1 (1 = fully wet).
+    gain_db : output gain in dB, applied after the mix (plugin range is +-18).
     preserve_formants : keep the spectral envelope in place when transposing.
         True is the AlterBoy behavior (pitch and formant independent); False
         lets formants follow the pitch (classic transpose sound).
-    tonality_limit_hz : upper limit for harmonic mapping inside the engine,
-        Signalsmith recommends ~8 kHz for voice.
+    tonality_limit_hz : upper limit for harmonic mapping inside the engine.
+        Signalsmith suggests ~8 kHz for voice, but listening tests on sung
+        vocals (2026-07-13, up5/up12 male hook) picked 12 kHz: audibly less
+        grainy, no regressions on female material or downshifts.
     formant_base_hz : anchor for the engine's envelope estimate. 0 = automatic;
         setting it near the singer's fundamental can improve formant tracking.
     """
@@ -46,8 +51,9 @@ class PitchShifter:
         pitch_semitones: float = 0.0,
         formant_semitones: float = 0.0,
         mix: float = 1.0,
+        gain_db: float = 0.0,
         preserve_formants: bool = True,
-        tonality_limit_hz: float = 8000.0,
+        tonality_limit_hz: float = 12000.0,
         formant_base_hz: float = 0.0,
     ):
         if sr <= 0:
@@ -56,6 +62,7 @@ class PitchShifter:
         self.pitch_semitones = float(pitch_semitones)
         self.formant_semitones = float(formant_semitones)
         self.mix = mix
+        self.gain_db = float(gain_db)
         self.preserve_formants = bool(preserve_formants)
         self.tonality_limit_hz = float(tonality_limit_hz)
         self.formant_base_hz = float(formant_base_hz)
@@ -118,5 +125,5 @@ class PitchShifter:
         wet = wet[:, :n]
 
         y = (1.0 - self._mix) * buf + self._mix * wet
-        y = y.astype(np.float32)
+        y = (y * db_to_lin(self.gain_db)).astype(np.float32)
         return y[0] if mono else y

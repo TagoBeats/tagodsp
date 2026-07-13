@@ -49,6 +49,12 @@ def test_mix_zero_is_exact_passthrough():
     np.testing.assert_allclose(y, x, atol=1e-7)
 
 
+def test_gain_db_scales_output_after_mix():
+    x = sine(300.0, dur_s=0.5)
+    y = PitchShifter(SR, pitch_semitones=5.0, mix=0.0, gain_db=-6.0).process(x)
+    np.testing.assert_allclose(y, x * 10 ** (-6.0 / 20.0), atol=1e-7)
+
+
 def test_output_shape_and_sanity_mono_and_stereo():
     x = sine(220.0, dur_s=1.0)
     shifter = PitchShifter(SR, pitch_semitones=3.0, formant_semitones=-2.0)
