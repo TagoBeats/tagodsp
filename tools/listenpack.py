@@ -38,10 +38,19 @@ class ListenPack:
         sr: int,
         label_a: str = "dry",
         label_b: str = "wet",
+        c: np.ndarray | None = None,
+        label_c: str = "ref",
     ) -> None:
-        """Write an adjacent A/B wav pair."""
+        """Write an adjacent A/B wav pair, plus an optional third reference C.
+
+        C is for tests where A/B alone leaves a null result ambiguous: it names
+        what to listen for (e.g. the isolated track that is supposedly masked),
+        so "heard nothing" can be told apart from "was never audible anyway".
+        """
         sf.write(self.audio_dir / f"{item}_A_{label_a}.wav", np.asarray(a, np.float32), sr)
         sf.write(self.audio_dir / f"{item}_B_{label_b}.wav", np.asarray(b, np.float32), sr)
+        if c is not None:
+            sf.write(self.audio_dir / f"{item}_C_{label_c}.wav", np.asarray(c, np.float32), sr)
 
     def add_plot(self, name: str, fig: plt.Figure) -> None:
         fig.savefig(self.plot_dir / f"{name}.png", dpi=150, bbox_inches="tight")
@@ -82,13 +91,21 @@ class ListenPack:
             item = re.match(r"(.+)_A_", f.name).group(1)
             b = list(self.audio_dir.glob(f"{item}_B_*.wav"))
             if b:
-                pairs[item] = (f.name, b[0].name)
+                c = list(self.audio_dir.glob(f"{item}_C_*.wav"))
+                pairs[item] = (f.name, b[0].name, c[0].name if c else None)
+
+        def buttons(a: str, b: str, c: str | None) -> str:
+            out = (
+                f'<button data-src="audio/{html_mod.escape(a)}">A</button>'
+                f'<button data-src="audio/{html_mod.escape(b)}">B</button>'
+            )
+            if c:
+                out += f'<button data-src="audio/{html_mod.escape(c)}">C</button>'
+            return out
 
         rows = "\n".join(
-            f'<div class="row"><span>{html_mod.escape(item)}</span>'
-            f'<button data-src="audio/{html_mod.escape(a)}">A</button>'
-            f'<button data-src="audio/{html_mod.escape(b)}">B</button></div>'
-            for item, (a, b) in pairs.items()
+            f'<div class="row"><span>{html_mod.escape(item)}</span>{buttons(a, b, c)}</div>'
+            for item, (a, b, c) in pairs.items()
         )
         page = f"""<!doctype html>
 <meta charset="utf-8">
