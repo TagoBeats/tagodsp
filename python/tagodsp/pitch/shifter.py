@@ -60,6 +60,12 @@ class PitchShifter:
         setting it near the singer's fundamental can improve formant tracking.
     level_compensation : compensate the measured wet level loss per semitone
         (see _LEVEL_COMP_DB) so all transpositions sit at similar loudness.
+        The table was measured with the default 120 ms block; treat it as an
+        approximation for custom block sizes.
+    block_s / interval_s : STFT block and hop in seconds. None = engine preset
+        (presetDefault: block 0.12 s, interval 0.03 s). Shorter blocks smear
+        transients less and gurgle less on dense material, at the cost of
+        rougher low end. Set both or neither.
     """
 
     def __init__(
@@ -73,9 +79,13 @@ class PitchShifter:
         tonality_limit_hz: float = 12000.0,
         formant_base_hz: float = 0.0,
         level_compensation: bool = True,
+        block_s: float | None = None,
+        interval_s: float | None = None,
     ):
         if sr <= 0:
             raise ValueError("sr must be > 0")
+        if (block_s is None) != (interval_s is None):
+            raise ValueError("set block_s and interval_s together or neither")
         self.sr = float(sr)
         self.pitch_semitones = float(pitch_semitones)
         self.formant_semitones = float(formant_semitones)
@@ -85,6 +95,8 @@ class PitchShifter:
         self.tonality_limit_hz = float(tonality_limit_hz)
         self.formant_base_hz = float(formant_base_hz)
         self.level_compensation = bool(level_compensation)
+        self.block_s = None if block_s is None else float(block_s)
+        self.interval_s = None if interval_s is None else float(interval_s)
         self._engine = python_stretch.Signalsmith.Stretch()
         self._channels = 0
 
@@ -110,7 +122,14 @@ class PitchShifter:
 
     def _prepare(self, channels: int) -> None:
         if channels != self._channels:
-            self._engine.preset(channels, self.sr)
+            if self.block_s is None:
+                self._engine.preset(channels, self.sr)
+            else:
+                self._engine.configure(
+                    channels,
+                    int(round(self.block_s * self.sr)),
+                    int(round(self.interval_s * self.sr)),
+                )
             self._channels = channels
 
     def reset(self) -> None:
