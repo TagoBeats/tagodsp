@@ -36,6 +36,8 @@ public:
             window_[k] = 0.5 - 0.5 * std::cos(2.0 * kPi * static_cast<double>(k) /
                                               static_cast<double>(nFft));
         }
+        frame_.resize(nFft_);
+        spectrum_.resize(nBins());
     }
 
     std::size_t nFft() const noexcept { return nFft_; }
@@ -69,32 +71,38 @@ public:
         return t;
     }
 
+    /// Power spectrum |S|^2 of frame `f`, written into `out[0, nBins())`.
+    ///
+    /// This is the single place a frame gets computed. A caller that only needs
+    /// a reduction of the spectrum (band power, for instance) can loop over
+    /// frames here and never hold the (frames x bins) grid, which for a few
+    /// minutes of audio is hundreds of megabytes.
+    void powerSpectrumFrame(const std::vector<double>& x, std::size_t f, double* out) const {
+        const std::ptrdiff_t pad = static_cast<std::ptrdiff_t>(nFft_ / 2);
+        const std::ptrdiff_t base = static_cast<std::ptrdiff_t>(f * hop_) - pad;
+        for (std::size_t k = 0; k < nFft_; ++k) {
+            const std::ptrdiff_t idx = base + static_cast<std::ptrdiff_t>(k);
+            const double sample = (idx < 0 || idx >= static_cast<std::ptrdiff_t>(x.size()))
+                                      ? 0.0
+                                      : x[static_cast<std::size_t>(idx)];
+            frame_[k] = sample * window_[k];
+        }
+        rfft_.forward(frame_.data(), spectrum_.data());
+        for (std::size_t k = 0; k < spectrum_.size(); ++k) {
+            const double re = spectrum_[k].real();
+            const double im = spectrum_[k].imag();
+            out[k] = re * re + im * im;
+        }
+    }
+
     /// Power spectrum |S|^2 of a mono signal, as a (frames x bins) grid.
+    /// Implemented on top of powerSpectrumFrame() so the whole-signal path and
+    /// the frame-at-a-time path can never drift apart.
     Matrix powerSpectrum(const std::vector<double>& x) const {
         const std::size_t nFrames = frameCount(x.size());
         Matrix out(nFrames, nBins());
-        if (nFrames == 0) {
-            return out;
-        }
-        const std::ptrdiff_t pad = static_cast<std::ptrdiff_t>(nFft_ / 2);
-        std::vector<double> frame(nFft_);
-        std::vector<std::complex<double>> spectrum(nBins());
         for (std::size_t f = 0; f < nFrames; ++f) {
-            const std::ptrdiff_t base = static_cast<std::ptrdiff_t>(f * hop_) - pad;
-            for (std::size_t k = 0; k < nFft_; ++k) {
-                const std::ptrdiff_t idx = base + static_cast<std::ptrdiff_t>(k);
-                const double sample =
-                    (idx < 0 || idx >= static_cast<std::ptrdiff_t>(x.size()))
-                        ? 0.0
-                        : x[static_cast<std::size_t>(idx)];
-                frame[k] = sample * window_[k];
-            }
-            rfft_.forward(frame.data(), spectrum.data());
-            for (std::size_t k = 0; k < spectrum.size(); ++k) {
-                const double re = spectrum[k].real();
-                const double im = spectrum[k].imag();
-                out.at(f, k) = re * re + im * im;
-            }
+            powerSpectrumFrame(x, f, &out.at(f, 0));
         }
         return out;
     }
@@ -104,6 +112,12 @@ private:
     std::size_t hop_;
     std::vector<double> window_;
     Rfft rfft_;
+
+    // Scratch, not state. Mutable so a frame can be computed through a const
+    // reference, the same way Rfft holds its own scratch. One Stft is therefore
+    // not safe to share across threads, which is the existing contract.
+    mutable std::vector<double> frame_;
+    mutable std::vector<std::complex<double>> spectrum_;
 };
 
 } // namespace tagodsp
