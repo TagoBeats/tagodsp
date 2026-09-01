@@ -134,12 +134,49 @@ gruenem Test:
 Danach: median 0.32, p90 0.66, max 0.985. Eine Schwelle bei 0.5 greift die
 obersten 27.7 Prozent der Zonen, bei 0.75 die obersten 4.1 Prozent.
 
-## Offene Maengel
+## Die Fragmentierung, geloest am 01.09.2026
 
-- Ein gemeldetes Paar zerfaellt in median 4, maximal 44 Zonen. Das braucht ein
-  Zusammenfassen vor der UI, nicht in ihr.
+Ein gemeldetes Paar kam nicht als ein Befund heraus, sondern als Haufen Zonen:
+median 3, maximal 64 (notiert war "median 4, maximal 44"; 44 ist das
+zweitschlimmste Paar). Gemessen ueber den Korpus laeuft der Split fast
+ausschliesslich entlang der Zeit: 58.8 Prozent der Zonenrelationen innerhalb
+eines Paares ueberlappen in der Frequenz und liegen nur zeitlich auseinander,
+weitere 38.7 Prozent liegen in beiden Achsen auseinander, eine echte zweite
+Frequenzregion zur selben Zeit sind 1.9 Prozent. Der mediane Zeitabstand
+zwischen frequenzueberlappenden Fragmenten betraegt 66 Fenster, also 13.2 s.
 
-Blockiert die Anzeige, nicht den C++-Port.
+Damit ist die Ursache benannt: das sind keine zerhackten Nachbarn, die ein
+groesseres `gap` verbinden koennte, sondern derselbe Streit, der im Arrangement
+wiederkehrt. `gap` hochzudrehen scheidet aus, ein Wert von 66 wuerde jede echte
+Pause schlucken und die Zeitausdehnung der Zone bedeutungslos machen.
+
+Loesung ist eine Schicht **ueber** dem Clustering, `summarize_conflicts()`,
+gemeldet als `MaskingResult.conflicts`: die Zonen eines Paares werden ueber
+ueberlappende Frequenzbereiche gruppiert, die Zeit wird zur Anzahl. 1222 Zonen
+werden zu 289 Konflikten, median 1 pro gemeldetem Paar, 83.1 Prozent der Paare
+zu genau einem, hoechstens drei. Vorkommen pro Konflikt: median 2, p90 10,
+max 44.
+
+Der Konflikt-Score ist das **Maximum** seiner Mitglieder, nicht der Mittelwert.
+Er ist der schlimmste Moment des Streits und die einzige Aggregation, die sich
+nicht bewegt, wenn dasselbe Material in mehr oder weniger Zonen zerfaellt; ein
+Mittelwert sinkt mit der Fragmentzahl und schmuggelt sie so in die Zahl zurueck.
+Dauerhaftigkeit bleibt eine eigene Achse (`occurrences`, `active_windows`),
+damit eine Anzeige nach Schwere oder nach Betroffenheit sortieren kann, ohne
+dass beides vermischt wird.
+
+Der Intervall-Merge ist transitiv und kann Zonen verketten, die einander nicht
+ueberlappen. Gemessen passiert das in 33 von 289 Gruppen und weitet den
+gemeldeten Bereich um hoechstens 0.66 Oktaven ueber das breiteste Mitglied
+hinaus, also zwei Baender, median 0.00.
+
+**Der Zonensatz ist unangetastet**, die Schicht ist rein additiv. Belegt per
+Werte-Diff ueber den Korpus, auf den Stem-Ordner gekeyt und nicht auf den
+Ordnernamen (drei Beats teilen sich einen Namen): 51 Beats, 1222 Zonen vorher
+wie nachher, 0 Abweichungen in Spurpaar, Band, Frequenz- und Fenstergrenzen und
+Score.
+
+Messwerte in `docs/measurements/masking_fragmentation_2026-09-01.md`.
 
 ## Grenzen der Evidenz
 
@@ -159,4 +196,4 @@ Gesamtmix; das entspricht dem Produkt und nicht der Mischsituation.
   `examples/masking_scale.py` (Verteilung der Skala),
   `examples/masking_zone_dump.py` (Werte-Diff ueber alle Zonenfelder), die
   beiden Listenpack-Renderer fuer die Hoertests
-- C++-Promotion erst nach dem offenen Mangel (Zonen-Fragmentierung)
+- Keine offenen Anzeige-Maengel mehr; der C++-Port ist damit nicht mehr blockiert

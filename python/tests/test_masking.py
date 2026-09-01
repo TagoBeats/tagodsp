@@ -5,7 +5,9 @@ from tagodsp.analysis.masking import (
     CONTENTION_CEIL_DB,
     MaskingDetector,
     Track,
+    Zone,
     _normalize_relative,
+    summarize_conflicts,
 )
 
 SR = 48000
@@ -293,3 +295,81 @@ def test_dominant_band_does_not_depend_on_the_zero_of_the_cell_scale():
 def test_invalid_window_seconds_raises():
     with pytest.raises(ValueError):
         MaskingDetector(sr=SR, window_seconds=0.0)
+
+
+def _zone(tracks, band, lo, hi, w0, w1, score):
+    return Zone(
+        tracks=tracks, band=band, freq_lo_hz=lo, freq_hi_hz=hi, windows=(w0, w1), score=score
+    )
+
+
+def test_conflicts_collapse_recurring_zones_of_one_pair():
+    # The measured shape of the problem: one dispute in one region, recurring
+    # far apart in time. Must come out as one conflict with three occurrences.
+    zones = [
+        _zone(("a", "b"), 5, 200.0, 250.0, 0, 4, 0.4),
+        _zone(("a", "b"), 5, 200.0, 250.0, 70, 74, 0.9),
+        _zone(("a", "b"), 5, 210.0, 260.0, 140, 143, 0.6),
+    ]
+    (c,) = summarize_conflicts(zones)
+    assert c.occurrences == 3
+    assert c.windows == (0, 143)
+    assert c.active_windows == 5 + 5 + 4  # gaps between occurrences are not counted
+    assert c.score == 0.9  # the worst member, not the mean
+    assert (c.freq_lo_hz, c.freq_hi_hz) == (200.0, 260.0)
+    assert len(c.zones) == 3
+
+
+def test_conflicts_keep_disjoint_frequency_regions_apart():
+    # 1.9 % of the corpus: a genuine second region. Must stay two entries.
+    zones = [
+        _zone(("a", "b"), 5, 200.0, 250.0, 0, 4, 0.4),
+        _zone(("a", "b"), 20, 3000.0, 3500.0, 0, 4, 0.8),
+    ]
+    out = summarize_conflicts(zones)
+    assert len(out) == 2
+    assert [c.score for c in out] == [0.8, 0.4]  # sorted by severity
+    assert {c.band for c in out} == {5, 20}
+
+
+def test_conflicts_do_not_mix_pairs():
+    zones = [
+        _zone(("a", "b"), 5, 200.0, 250.0, 0, 4, 0.4),
+        _zone(("a", "c"), 5, 200.0, 250.0, 0, 4, 0.5),
+    ]
+    out = summarize_conflicts(zones)
+    assert len(out) == 2
+    assert {c.tracks for c in out} == {("a", "b"), ("a", "c")}
+
+
+def test_conflict_score_is_invariant_under_fragmentation():
+    """The point of max: splitting one zone into many must not move the number."""
+    whole = [_zone(("a", "b"), 5, 200.0, 250.0, 0, 29, 0.8)]
+    split = [
+        _zone(("a", "b"), 5, 200.0, 250.0, w, w + 2, s)
+        for w, s in zip(range(0, 30, 10), (0.8, 0.3, 0.2))
+    ]
+    assert summarize_conflicts(whole)[0].score == summarize_conflicts(split)[0].score
+
+
+def test_conflict_band_is_weighted_by_time_not_by_zone_count():
+    # Band 5 is named by one long zone, band 6 by two short ones. Time wins.
+    zones = [
+        _zone(("a", "b"), 5, 200.0, 250.0, 0, 19, 0.5),
+        _zone(("a", "b"), 6, 210.0, 260.0, 30, 32, 0.5),
+        _zone(("a", "b"), 6, 210.0, 260.0, 40, 42, 0.5),
+    ]
+    (c,) = summarize_conflicts(zones)
+    assert c.band == 5
+
+
+def test_conflicts_are_additive_to_the_zone_set():
+    """The validated zone set has to survive the summary layer untouched."""
+    a = _tone(200.0, 1.5, SR, amp=0.5)
+    b = _tone(200.0, 1.5, SR, amp=0.5)
+    det = MaskingDetector(sr=SR, scoring="contention")
+    res = det.analyze([Track("a", a), Track("b", b)])
+    assert res.zones
+    assert sum(c.occurrences for c in res.conflicts) == len(res.zones)
+    members = [z for c in res.conflicts for z in c.zones]
+    assert sorted(map(id, members)) == sorted(map(id, res.zones))

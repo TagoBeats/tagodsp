@@ -120,6 +120,15 @@ regions below the score threshold are dropped. The surviving region value is
 mapped to Zone.score, which is always in [0, 1]: identity for "relative" and
 "collision", the dB normalization described above for "contention".
 
+On top of the zones sits a summary layer, `summarize_conflicts()`, reported as
+`MaskingResult.conflicts`. A reported pair breaks into median 3 and up to 64
+zones, which no display can show as 64 findings. Measured, that split runs along
+time and not along frequency, so the same dispute recurs across the arrangement
+instead of covering several regions. The layer merges a pair's zones by
+overlapping frequency range and turns time into a count. It is purely additive:
+`zones` is untouched, and every `Conflict` keeps its members. See
+`summarize_conflicts` for the numbers and for why `score` is the maximum.
+
 Source: ~/Documents/project-xray/mockup/analysis/analyze_stems.py,
 `analyze_streams()` and `detect_conflicts()`.
 """
@@ -155,6 +164,25 @@ class Zone:
 
 
 @dataclass
+class Conflict:
+    """One recurring dispute between two tracks: a frequency region, N occurrences.
+
+    A summary over `Zone`s, not a replacement for them. See `summarize_conflicts`
+    for why the grouping runs over frequency and collapses time.
+    """
+
+    tracks: tuple[str, str]
+    band: int  # the band the conflict spends the most window-time in
+    freq_lo_hz: float  # union over the member zones
+    freq_hi_hz: float
+    windows: tuple[int, int]  # first and last window the conflict touches
+    active_windows: int  # windows actually covered, gaps between occurrences not counted
+    occurrences: int  # number of member zones
+    score: float  # the worst member, see summarize_conflicts
+    zones: list[Zone]  # the members, for drill-down
+
+
+@dataclass
 class MaskingResult:
     zones: list[Zone]
     band_edges_hz: np.ndarray
@@ -165,6 +193,98 @@ class MaskingResult:
     # per pair, (n_windows, n_bands), the values clustering ran on. Unit depends
     # on the scoring: [0, 1] for "relative" and "collision", dB for "contention".
     cells: dict[tuple[str, str], np.ndarray]
+    # `zones` grouped into recurring disputes; see summarize_conflicts. Purely
+    # additive, the zone list above is untouched.
+    conflicts: list["Conflict"] = field(default_factory=list)
+
+
+def summarize_conflicts(zones: list[Zone]) -> list["Conflict"]:
+    """Group a pair's zones into recurring conflicts, merging over frequency overlap.
+
+    A reported pair breaks into median 3, mean 5.0 and up to 64 zones, which is
+    a display blocker: the same dispute gets listed dozens of times. (The 44
+    noted earlier is the second worst pair, not the maximum.) Measured over the
+    corpus (51 beats, 242 reported pairs, 1222 zones, `examples/masking_zone_dump.py`
+    2026-09-01) the split is almost entirely along time, not frequency:
+
+      - 58.8 % of the zone pairs inside one reported pair overlap in frequency
+        and only sit apart in time; another 38.7 % sit apart in both, which is
+        the same case with slightly shifted band edges
+      - a genuine second frequency region at the same time is 1.9 %
+      - the median time gap between frequency-overlapping fragments is 66
+        windows (13.2 s on the corpus grid), so these are not chopped up
+        neighbours the clustering gap could have bridged, they are the same
+        problem recurring across the arrangement
+
+    So the grouping merges member zones whose frequency ranges overlap and
+    collapses time into a count. Over the corpus that takes 1222 zones down to
+    289 conflicts: median 1 per reported pair, 83.1 % of the pairs to a single
+    conflict, at most 3. Occurrences per conflict run median 2, p90 10, max 44.
+
+    The interval merge is transitive and can chain zones that do not overlap
+    each other (A 100-200, B 190-400, C 390-800). Measured, that happens in 33
+    of 289 groups and widens the reported range by at most 0.66 octaves over the
+    widest member, i.e. two bands, median 0.00. Accepted: the alternative is
+    reporting a pair's one dispute as two entries whose ranges touch.
+
+    `score` is the maximum over the members, not the mean: it is the worst
+    moment of the dispute, and it is the only aggregate that does not change
+    when the same material fragments into more or fewer zones. Persistence is
+    reported separately as `occurrences` and `active_windows` so a UI can rank
+    by severity or by how much of the track is affected without the two being
+    mixed into one number.
+    """
+    by_pair: dict[tuple[str, str], list[Zone]] = {}
+    for z in zones:
+        by_pair.setdefault(z.tracks, []).append(z)
+
+    conflicts: list[Conflict] = []
+    for tracks, members in by_pair.items():
+        for group in _merge_by_frequency(members):
+            covered: set[int] = set()
+            for z in group:
+                covered.update(range(z.windows[0], z.windows[1] + 1))
+            # dominant band weighted by window-time, not by zone count: a band
+            # named by one long zone beats one named by two single-window ones
+            time_per_band: dict[int, int] = {}
+            for z in group:
+                span = z.windows[1] - z.windows[0] + 1
+                time_per_band[z.band] = time_per_band.get(z.band, 0) + span
+            conflicts.append(
+                Conflict(
+                    tracks=tracks,
+                    band=max(time_per_band, key=lambda k: (time_per_band[k], -k)),
+                    freq_lo_hz=min(z.freq_lo_hz for z in group),
+                    freq_hi_hz=max(z.freq_hi_hz for z in group),
+                    windows=(min(z.windows[0] for z in group), max(z.windows[1] for z in group)),
+                    active_windows=len(covered),
+                    occurrences=len(group),
+                    score=max(z.score for z in group),
+                    zones=sorted(group, key=lambda z: (z.windows[0], z.band)),
+                )
+            )
+
+    conflicts.sort(key=lambda c: c.score, reverse=True)
+    return conflicts
+
+
+def _merge_by_frequency(members: list[Zone]) -> list[list[Zone]]:
+    """Group zones whose frequency ranges overlap, sweeping low to high."""
+    groups: list[list[Zone]] = []
+    current: list[Zone] = []
+    reach = 0.0
+    for z in sorted(members, key=lambda z: (z.freq_lo_hz, z.freq_hi_hz)):
+        if current and z.freq_lo_hz < reach:
+            current.append(z)
+            reach = max(reach, z.freq_hi_hz)
+        else:
+            if current:
+                groups.append(current)
+            current = [z]
+            reach = z.freq_hi_hz
+    if current:
+        groups.append(current)
+    return groups
 
 
 def _normalize_relative(P: np.ndarray, db_floor: float) -> np.ndarray:
@@ -476,4 +596,5 @@ class MaskingDetector:
             scoring=self.scoring,
             band_power=band_power,
             cells=cells,
+            conflicts=summarize_conflicts(zones),
         )

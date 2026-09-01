@@ -9,6 +9,10 @@ Zone.score is reported both as stored and in dB, because a change to the
 display normalization is expected to move `score` while the underlying dB value
 and the zone set itself must not move.
 
+The conflict summary (MaskingResult.conflicts) is dumped alongside, under its
+own key, so one corpus pass proves both things at once: that the zone set did
+not move, and what the summary layer collapses it to.
+
 Run:  uv run python examples/masking_zone_dump.py ~/Music --out zones.json
 """
 
@@ -64,11 +68,35 @@ def main() -> None:
             for z in res.zones
         ]
         zones.sort(key=lambda z: (z["tracks"], z["band"], z["w0"], z["w1"]))
-        out.append({"beat": folder.name, "folder": str(folder.resolve()), "zones": zones})
-        print(f"  {folder.name[:48]:<48} {len(zones):>4} zones")
+        conflicts = [
+            {
+                "tracks": sorted(c.tracks),
+                "band": c.band,
+                "freq_lo_hz": round(c.freq_lo_hz, 4),
+                "freq_hi_hz": round(c.freq_hi_hz, 4),
+                "w0": c.windows[0],
+                "w1": c.windows[1],
+                "active_windows": c.active_windows,
+                "occurrences": c.occurrences,
+                "score": round(c.score, 6),
+            }
+            for c in res.conflicts
+        ]
+        conflicts.sort(key=lambda c: (c["tracks"], c["band"], c["w0"], c["w1"]))
+        out.append(
+            {
+                "beat": folder.name,
+                "folder": str(folder.resolve()),
+                "zones": zones,
+                "conflicts": conflicts,
+            }
+        )
+        print(f"  {folder.name[:48]:<48} {len(zones):>4} zones  {len(conflicts):>4} conflicts")
 
     args.out.write_text(json.dumps(out, indent=2))
-    print(f"\n{sum(len(b['zones']) for b in out)} zones over {len(out)} beats -> {args.out}")
+    n_zones = sum(len(b["zones"]) for b in out)
+    n_conflicts = sum(len(b["conflicts"]) for b in out)
+    print(f"\n{n_zones} zones, {n_conflicts} conflicts over {len(out)} beats -> {args.out}")
 
 
 if __name__ == "__main__":
