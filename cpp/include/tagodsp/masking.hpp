@@ -389,6 +389,20 @@ public:
         foldBins(spectrumScratch_.data(), out);
     }
 
+    /// Band power of one already positioned frame of `stft().nFft()` samples.
+    ///
+    /// The streaming counterpart of bandPowerFrame(): a live caller holds a ring
+    /// of recent samples rather than the signal, so it positions the frame
+    /// itself and the window and the transform still happen in here.
+    void bandPowerOfSamples(const double* samples, double* out) const {
+        spectrumScratch_.resize(stft_.nBins());
+        stft_.powerSpectrumOfSamples(samples, spectrumScratch_.data());
+        std::fill(out, out + p_.nBands, 0.0);
+        foldBins(spectrumScratch_.data(), out);
+    }
+
+    const Stft& stft() const noexcept { return stft_; }
+
     /// Per-frame band power of a signal, (frames x nBands).
     ///
     /// This is the representation a live caller wants to hold on to. A frame is
