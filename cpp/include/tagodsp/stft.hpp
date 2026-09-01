@@ -37,6 +37,7 @@ public:
                                               static_cast<double>(nFft));
         }
         frame_.resize(nFft_);
+        slice_.resize(nFft_);
         spectrum_.resize(nBins());
     }
 
@@ -82,10 +83,23 @@ public:
         const std::ptrdiff_t base = static_cast<std::ptrdiff_t>(f * hop_) - pad;
         for (std::size_t k = 0; k < nFft_; ++k) {
             const std::ptrdiff_t idx = base + static_cast<std::ptrdiff_t>(k);
-            const double sample = (idx < 0 || idx >= static_cast<std::ptrdiff_t>(x.size()))
-                                      ? 0.0
-                                      : x[static_cast<std::size_t>(idx)];
-            frame_[k] = sample * window_[k];
+            slice_[k] = (idx < 0 || idx >= static_cast<std::ptrdiff_t>(x.size()))
+                            ? 0.0
+                            : x[static_cast<std::size_t>(idx)];
+        }
+        powerSpectrumOfSamples(slice_.data(), out);
+    }
+
+    /// Power spectrum |S|^2 of `nFft()` raw samples the caller has already
+    /// positioned. The Hann window is applied here, so a caller that feeds
+    /// frames from its own buffer cannot get the windowing subtly wrong.
+    ///
+    /// This exists for streaming callers. powerSpectrumFrame() gathers a frame
+    /// out of a whole signal and then lands here, so an offline run and a live
+    /// one go through the same window and the same transform.
+    void powerSpectrumOfSamples(const double* samples, double* out) const {
+        for (std::size_t k = 0; k < nFft_; ++k) {
+            frame_[k] = samples[k] * window_[k];
         }
         rfft_.forward(frame_.data(), spectrum_.data());
         for (std::size_t k = 0; k < spectrum_.size(); ++k) {
@@ -117,6 +131,7 @@ private:
     // reference, the same way Rfft holds its own scratch. One Stft is therefore
     // not safe to share across threads, which is the existing contract.
     mutable std::vector<double> frame_;
+    mutable std::vector<double> slice_;
     mutable std::vector<std::complex<double>> spectrum_;
 };
 
