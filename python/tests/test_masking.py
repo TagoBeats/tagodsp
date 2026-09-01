@@ -1,13 +1,24 @@
 import numpy as np
 import pytest
 
-from tagodsp.analysis.masking import MaskingDetector, Track, _normalize_relative
+from tagodsp.analysis.masking import (
+    CONTENTION_CEIL_DB,
+    MaskingDetector,
+    Track,
+    _normalize_relative,
+)
 
 SR = 48000
 
 
-def _tone(freq_hz: float, dur_s: float, sr: float, amp: float = 0.5, start_s: float = 0.0,
-          total_s: float | None = None) -> np.ndarray:
+def _tone(
+    freq_hz: float,
+    dur_s: float,
+    sr: float,
+    amp: float = 0.5,
+    start_s: float = 0.0,
+    total_s: float | None = None,
+) -> np.ndarray:
     """Sine tone active in [start_s, start_s + dur_s), zero elsewhere, over total_s."""
     total_s = total_s if total_s is not None else start_s + dur_s
     n_total = int(round(total_s * sr))
@@ -194,10 +205,89 @@ def test_invalid_scoring_raises():
         MaskingDetector(sr=SR, scoring="nonsense")
 
 
-def test_contention_floor_validation():
-    # contention_floor_db must be < CONTENTION_CEIL_DB (-3.0).
+def test_contention_score_db_must_be_below_ceiling():
+    # A reporting threshold at or above the exact upper bound of the measure
+    # would leave the display scale with zero or negative span.
     with pytest.raises(ValueError):
-        MaskingDetector(sr=SR, contention_floor_db=0.0)
+        MaskingDetector(sr=SR, contention_score_db=CONTENTION_CEIL_DB)
+
+
+def test_contention_hit_db_must_not_exceed_score_db():
+    # A region is scored by the p90 over its own cells, so a hit threshold
+    # above the score threshold makes the score threshold unreachable.
+    with pytest.raises(ValueError):
+        MaskingDetector(sr=SR, contention_hit_db=-5.0, contention_score_db=-9.75)
+
+
+def test_contention_cells_are_db_others_are_unit_interval():
+    # The unit of MaskingResult.cells depends on the scoring. Guards the split
+    # between dB thresholds (contention) and [0, 1] thresholds (the other two).
+    a = _tone(200.0, 1.0, SR, amp=0.5)
+    b = _tone(200.0, 1.0, SR, amp=0.5)
+    tracks = [Track("a", a), Track("b", b)]
+
+    cells = MaskingDetector(sr=SR, scoring="contention").analyze(tracks).cells
+    values = np.concatenate([c.ravel() for c in cells.values()])
+    assert values.max() <= CONTENTION_CEIL_DB + 1e-9
+    assert values.min() < 0.0
+
+    for scoring in ("relative", "collision"):
+        cells = MaskingDetector(sr=SR, scoring=scoring).analyze(tracks).cells
+        values = np.concatenate([c.ravel() for c in cells.values()])
+        assert values.min() >= 0.0 and values.max() <= 1.0
+
+
+def test_contention_zone_score_spans_the_reported_range():
+    # Two identical tones fully contend, so the zone has to land near the top
+    # of the display scale. On the old -30 dB normalization the same zone came
+    # out around 0.83 and every reported zone sat above 0.75, which made a
+    # display threshold useless.
+    a = _tone(200.0, 1.0, SR, amp=0.5)
+    b = _tone(200.0, 1.0, SR, amp=0.5)
+    det = MaskingDetector(sr=SR, scoring="contention")
+    zones = det.analyze([Track("a", a), Track("b", b)]).zones
+    assert zones
+    # not 1.0: reaching the ceiling needs the pair's entire energy in one band,
+    # and STFT leakage spills part of a single sine into its neighbours
+    assert zones[0].score > 0.8
+    assert all(0.0 <= z.score <= 1.0 for z in zones)
+
+
+def test_contention_zone_score_is_the_documented_mapping():
+    # score = clip((p90_db - contention_score_db) / (CEIL - contention_score_db))
+    det = MaskingDetector(sr=SR, scoring="contention")
+    span = CONTENTION_CEIL_DB - det.contention_score_db
+    assert det._zone_score(det.contention_score_db) == 0.0
+    assert det._zone_score(CONTENTION_CEIL_DB) == 1.0
+    mid = det.contention_score_db + span / 2
+    assert np.isclose(det._zone_score(mid), 0.5)
+    # a region value below the reporting threshold cannot be reported, but the
+    # mapping must still clip instead of going negative
+    assert det._zone_score(det.contention_score_db - 10.0) == 0.0
+
+
+def test_dominant_band_does_not_depend_on_the_zero_of_the_cell_scale():
+    # The prototype summed [0, 1] cell values per band, where every cell of a
+    # region sits between hit_min and 1.0, so the sum ranked bands by cell
+    # count. With dB cells (all negative) the same sum would rank them the
+    # other way round and silently move the zone to a different band.
+    n_windows, n_bands = 6, 30
+    unit = np.zeros((n_windows, n_bands))
+    unit[0:4, 5] = 0.90  # 4 cells, the band that carries the region
+    unit[0:2, 6] = 0.95  # 2 cells, stronger each but fewer
+    db = np.full((n_windows, n_bands), -60.0)
+    db[0:4, 5] = -5.0
+    db[0:2, 6] = -4.0
+
+    det_unit = MaskingDetector(sr=SR, scoring="relative")
+    det_db = MaskingDetector(sr=SR, scoring="contention")
+    edges = det_unit.band_edges()
+
+    z_unit = det_unit._cluster(unit, edges, "a", "b", 0.7, 0.75)
+    z_db = det_db._cluster(db, edges, "a", "b", -11.1, -9.75)
+    assert len(z_unit) == 1 and len(z_db) == 1
+    assert z_unit[0].band == 5
+    assert z_db[0].band == 5
 
 
 def test_invalid_window_seconds_raises():

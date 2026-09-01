@@ -16,8 +16,10 @@ and therefore mask each other. Pipeline (shared by all scoring methods):
      shape (n_windows, n_bands), holding absolute (non-normalized) power
 
 Three scoring methods turn a pair of band-power matrices into a per-cell
-"conflict amount" in [0, 1]. They differ ONLY in this cell value; clustering
-into zones is identical for all three.
+"conflict amount". "relative" and "collision" produce cells in [0, 1] and are
+thresholded there; "contention" produces cells in dB and is thresholded in dB,
+with the [0, 1] normalization applied once per surviving zone (see below). The
+clustering itself is the same code for all three.
 
 Scoring "relative" (the X-Ray prototype's current, shipped behavior):
 
@@ -59,9 +61,7 @@ Scoring "contention" (replaces the ratio-plus-gate with one term):
     mix_bb[w] = band_power[a][w, k] + band_power[b][w, k], summed over bands,
                 for the two tracks being compared
     share     = min(a, b) / mix_bb[w]            # 0.0 if mix_bb[w] <= 0
-    d         = 10 * log10(max(share, 1e-12))
-    cell      = clip((d - contention_floor_db) / (CONTENTION_CEIL_DB - contention_floor_db),
-                      0.0, 1.0)
+    cell      = 10 * log10(max(share, 1e-12))    # dB, NOT normalized to [0, 1]
 
 `mix_bb` is the same pair-broadband sum used by "collision" (shared via the
 `_pair_broadband` helper), not the whole mix; see the rationale above the
@@ -77,26 +77,48 @@ the pair as the reference this bound is exact, not just an upper bound: two
 tracks equally loud with their entire energy in one band makes
 min(a, b) / mix_bb equal to exactly 0.5, i.e. -3.01 dB. The scale is
 normalized against -3 dB, not 0 dB, because 0 dB would never be reachable.
+Measured over the corpus (51 beats, examples/masking_scale.py, 2026-09-01) the
+bound is not just theoretical: the highest cell anywhere reaches -3.13 dB, so
+the top of the scale is real material and not headroom.
+
+Thresholds and display scale are separate for "contention", and this is the
+one thing that differs from the other two scorings:
+
+  - clustering decides on the dB value directly, via contention_hit_db and
+    contention_score_db, NOT on a [0, 1] cell. Physical thresholds survive a
+    change of the display scale and port to C++ without a hidden mapping.
+  - the reported Zone.score is normalized afterwards, over
+    [contention_score_db, CONTENTION_CEIL_DB]. Everything that gets reported
+    at all lives in that window, so the displayed score uses its full range.
+
+The defaults -11.1 dB (hit) and -9.75 dB (score) are the exact dB equivalents
+of the hit_min=0.7 / score_min=0.75 pair on the old -30 dB / -3 dB scale, so
+the set of reported zones is unchanged from the detector that Phase 0
+validated by ear. Only the number attached to a zone changed. The old
+contention_floor_db = -30.0 was documented as an unvalidated placeholder and
+is gone: measured over the corpus, reported zones span -9.75 to -3.10 dB, a
+window of 6.65 dB. Normalizing that over 27 dB pressed every zone into the top
+quarter of [0, 1] (median 0.83, p99 0.96) and made a display threshold near
+0.95 meaningless. A zone sitting exactly on the reporting threshold now
+displays as 0.0: it is the least bad thing still worth showing, not "nothing".
 
 There is no separate audibility gate. min(a, b) does that job by itself:
   - one track much quieter than the other -> min(a, b) small -> share small
   - both tracks quiet (even at ratio 1.0) -> min(a, b) small -> share small
   - one track alone is loud, the other silent -> min(a, b) = 0 -> share = 0
 
-contention_floor_db = -30.0 is an unvalidated starting point. It is meant to
-come from a measurement over a larger corpus that has not been run yet.
-Do not retune it against individual files.
-
-Both hit_min and score_min are tuned for "relative" (the shipped detector);
-they have not been re-measured for "collision" or "contention" yet. A later
-measurement is meant to decide which scoring method to keep.
+hit_min and score_min apply to "relative" and "collision" only, and are tuned
+for "relative" (the X-Ray prototype's shipped detector). "contention" uses its
+own dB thresholds; see above.
 
 Clustering (identical for all methods), ported from the X-Ray prototype's
 `detect_conflicts()` (~/Documents/project-xray/mockup/analysis/analyze_stems.py):
-cells with `cell >= hit_min` are grouped by BFS into regions (time gaps up to
-`gap` windows, band adjacency of 1), short regions (< min_len windows) are
-dropped, and the region score is the 90th-percentile cell value; regions
-below `score_min` are dropped.
+cells at or above the hit threshold are grouped by BFS into regions (time gaps
+up to `gap` windows, band adjacency of 1), short regions (< min_len windows)
+are dropped, and the region value is the 90th percentile over its cells;
+regions below the score threshold are dropped. The surviving region value is
+mapped to Zone.score, which is always in [0, 1]: identity for "relative" and
+"collision", the dB normalization described above for "contention".
 
 Source: ~/Documents/project-xray/mockup/analysis/analyze_stems.py,
 `analyze_streams()` and `detect_conflicts()`.
@@ -111,7 +133,8 @@ from tagodsp.spectral.stft import Stft
 
 # Ceiling for scoring="contention": with the pair as broadband reference,
 # min(a, b) / mix_bb reaches exactly 0.5 when the two tracks are equally
-# loud (-3.01 dB). See module docstring for the derivation.
+# loud (-3.01 dB). See module docstring for the derivation; measured over the
+# corpus the highest cell reaches -3.13 dB, so the bound is not just theory.
 CONTENTION_CEIL_DB = -3.0
 
 
@@ -139,7 +162,9 @@ class MaskingResult:
     window_seconds: float
     scoring: str
     band_power: dict[str, np.ndarray]  # per track, (n_windows, n_bands), absolute
-    cells: dict[tuple[str, str], np.ndarray]  # per pair, (n_windows, n_bands)
+    # per pair, (n_windows, n_bands), the values clustering ran on. Unit depends
+    # on the scoring: [0, 1] for "relative" and "collision", dB for "contention".
+    cells: dict[tuple[str, str], np.ndarray]
 
 
 def _normalize_relative(P: np.ndarray, db_floor: float) -> np.ndarray:
@@ -163,8 +188,8 @@ class MaskingDetector:
 
     See module docstring for the shared pipeline and the three scoring
     formulas ("relative" vs "collision" vs "contention"). hit_min/score_min
-    defaults are tuned for scoring="relative" and unvalidated for
-    scoring="collision" or scoring="contention".
+    apply to "relative" and "collision" only and are tuned for "relative";
+    "contention" thresholds in dB via contention_hit_db/contention_score_db.
     """
 
     sr: float
@@ -173,15 +198,18 @@ class MaskingDetector:
     f_lo: float = 20.0
     f_hi: float = 20000.0
     window_seconds: float = 0.1
-    hit_min: float = 0.7
-    score_min: float = 0.75
+    hit_min: float = 0.7  # not used by scoring="contention"
+    score_min: float = 0.75  # not used by scoring="contention"
     gap: int = 2
     min_len: int = 3
     db_floor: float = -36.0  # only used by scoring="relative"
     band_floor_db: float = -35.0  # only used by scoring="collision"
     abs_floor_db: float = -80.0  # only used by scoring="collision"
-    # only used by scoring="contention"; unvalidated, see module docstring
-    contention_floor_db: float = -30.0
+    # only used by scoring="contention". The defaults are the exact dB
+    # equivalents of hit_min=0.7 / score_min=0.75 on the old -30 dB scale, so
+    # the reported zones are the ones Phase 0 validated. See module docstring.
+    contention_hit_db: float = -11.1
+    contention_score_db: float = -9.75
     stft: Stft = field(default_factory=lambda: Stft(n_fft=4096, hop=1024))
 
     def __post_init__(self) -> None:
@@ -189,10 +217,16 @@ class MaskingDetector:
             raise ValueError(
                 f"scoring must be 'collision', 'relative', or 'contention', got {self.scoring!r}"
             )
-        if self.contention_floor_db >= CONTENTION_CEIL_DB:
+        if self.contention_score_db >= CONTENTION_CEIL_DB:
             raise ValueError(
-                f"contention_floor_db must be < {CONTENTION_CEIL_DB}, "
-                f"got {self.contention_floor_db!r}"
+                f"contention_score_db must be < {CONTENTION_CEIL_DB}, "
+                f"got {self.contention_score_db!r}"
+            )
+        if self.contention_hit_db > self.contention_score_db:
+            raise ValueError(
+                "contention_hit_db must be <= contention_score_db, otherwise a region "
+                "could never reach a score its own cells cannot have; got "
+                f"{self.contention_hit_db!r} > {self.contention_score_db!r}"
             )
         if self.n_bands < 2:
             raise ValueError("n_bands must be >= 2")
@@ -268,9 +302,35 @@ class MaskingDetector:
             n_windows = max(1, int(round(longest / self.window_seconds)))
         return self._aggregate_bands(power, band_idx, times, n_windows)
 
-    def _cluster(self, cell: np.ndarray, edges: np.ndarray, name_i: str, name_j: str) -> list[Zone]:
+    def _zone_score(self, value: float) -> float:
+        """Map a surviving region value to the reported Zone.score in [0, 1].
+
+        Identity for "relative"/"collision", whose cells already are [0, 1].
+        For "contention" the cells are dB, normalized here over
+        [contention_score_db, CONTENTION_CEIL_DB]: the reporting threshold
+        displays as 0.0, the exact upper bound of the measure as 1.0.
+        """
+        if self.scoring != "contention":
+            return value
+        span = CONTENTION_CEIL_DB - self.contention_score_db
+        return float(np.clip((value - self.contention_score_db) / span, 0.0, 1.0))
+
+    def _cluster(
+        self,
+        cell: np.ndarray,
+        edges: np.ndarray,
+        name_i: str,
+        name_j: str,
+        hit_min: float,
+        score_min: float,
+    ) -> list[Zone]:
+        """Group cells at or above `hit_min` into zones, keeping regions >= `score_min`.
+
+        Both thresholds are in the unit of `cell`, which the caller picks: [0, 1]
+        for "relative"/"collision", dB for "contention".
+        """
         n_windows, n_bands = cell.shape
-        hit = cell >= self.hit_min
+        hit = cell >= hit_min
         seen = np.zeros_like(hit, dtype=bool)
         zones: list[Zone] = []
         for w0, k0 in np.argwhere(hit):
@@ -299,14 +359,24 @@ class MaskingDetector:
                 continue
             vals = np.sort([cell[w, k] for w, k in cells])
             idx = min(int(len(vals) * 0.9), len(vals) - 1)
-            score = float(vals[idx])
-            if score < self.score_min:
+            value = float(vals[idx])
+            if value < score_min:
                 continue
-            band_energy: dict[int, float] = {}
+            score = self._zone_score(value)
+            # Dominant band: the one contributing the most cells to the region,
+            # ties broken by their summed strength. The X-Ray prototype summed
+            # the [0, 1] cell values, where every cell of a region sits between
+            # hit_min and 1.0 and the sum is therefore a cell count with a weak
+            # strength modulation. Made explicit here so the choice no longer
+            # depends on where the zero of the cell scale happens to sit, which
+            # would silently change once the cells are dB.
+            band_count: dict[int, int] = {}
+            band_strength: dict[int, float] = {}
             for w, k in cells:
-                band_energy[k] = band_energy.get(k, 0.0) + float(cell[w, k])
+                band_count[k] = band_count.get(k, 0) + 1
+                band_strength[k] = band_strength.get(k, 0.0) + float(cell[w, k])
             ks = [k for _, k in cells]
-            band = max(band_energy, key=band_energy.get)
+            band = max(band_count, key=lambda k: (band_count[k], band_strength[k]))
             zones.append(
                 Zone(
                     tracks=(name_i, name_j),
@@ -347,7 +417,9 @@ class MaskingDetector:
                     name_i, name_j = tracks[i].name, tracks[j].name
                     cell = np.minimum(norm[name_i], norm[name_j])
                     cells[(name_i, name_j)] = cell
-                    zones.extend(self._cluster(cell, edges, name_i, name_j))
+                    zones.extend(
+                        self._cluster(cell, edges, name_i, name_j, self.hit_min, self.score_min)
+                    )
         elif self.scoring == "collision":
             abs_floor = 10 ** (self.abs_floor_db / 10)
             band_floor = 10 ** (self.band_floor_db / 10)
@@ -365,7 +437,9 @@ class MaskingDetector:
                     gate_band = denom >= band_floor * mix_bb[:, None]
                     cell = np.where(gate_abs[:, None] & gate_band, c, 0.0)
                     cells[(name_i, name_j)] = cell
-                    zones.extend(self._cluster(cell, edges, name_i, name_j))
+                    zones.extend(
+                        self._cluster(cell, edges, name_i, name_j, self.hit_min, self.score_min)
+                    )
         else:  # contention
             for i in range(len(tracks)):
                 for j in range(i + 1, len(tracks)):
@@ -377,15 +451,20 @@ class MaskingDetector:
                     share = np.zeros_like(a)
                     nz = mix_bb > 0
                     share[nz, :] = min_ab[nz, :] / mix_bb[nz, None]
-                    d = 10.0 * np.log10(np.maximum(share, 1e-12))
-                    cell = np.clip(
-                        (d - self.contention_floor_db)
-                        / (CONTENTION_CEIL_DB - self.contention_floor_db),
-                        0.0,
-                        1.0,
-                    )
+                    # cells stay in dB here; clustering thresholds are dB and the
+                    # normalization to [0, 1] happens once per surviving zone
+                    cell = 10.0 * np.log10(np.maximum(share, 1e-12))
                     cells[(name_i, name_j)] = cell
-                    zones.extend(self._cluster(cell, edges, name_i, name_j))
+                    zones.extend(
+                        self._cluster(
+                            cell,
+                            edges,
+                            name_i,
+                            name_j,
+                            self.contention_hit_db,
+                            self.contention_score_db,
+                        )
+                    )
 
         zones.sort(key=lambda z: z.score, reverse=True)
 

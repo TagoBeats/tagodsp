@@ -9,10 +9,14 @@ gegen den Prototyp verifiziert (26 von 26 Zonen identisch).
 
 Mono-Summe je Spur, STFT, Leistungsspektrum, Aggregation auf 30 logarithmische
 Baender von 20 Hz bis 20 kHz und auf Zeitfenster fester Laenge. Pro Spurpaar
-entsteht daraus eine Zellmatrix (Fenster x Band) mit einem Konfliktwert in
-[0, 1]. Clustering identisch fuer alle Scorings: BFS ueber Zellen ab `hit_min`,
+entsteht daraus eine Zellmatrix (Fenster x Band) mit einem Konfliktwert.
+Clustering identisch fuer alle Scorings: BFS ueber Zellen ab der Hit-Schwelle,
 Bandnachbarschaft 1, Zeitluecken bis 2 Fenster, Mindestdauer 3 Fenster,
-Zonen-Score als p90 der Region.
+Zonenwert als p90 der Region. Bei `relative` und `collision` sind die Zellen
+[0, 1] und die Schwellen sind es auch (`hit_min`, `score_min`); bei
+`contention` sind die Zellen dB und die Schwellen ebenfalls
+(`contention_hit_db`, `contention_score_db`), die Normierung auf [0, 1]
+passiert einmal pro ueberlebender Zone.
 
 ## Drei Scorings, zwei scheiden aus
 
@@ -26,8 +30,7 @@ Zonen-Score als p90 der Region.
   75 Prozent seiner Zonen liegen in Baendern 25 bis 35 dB unter der
   Breitbandleistung ihres Fensters, also in unhoerbarem Material, das nur
   punktet weil beide Spuren dort gleich leise sind.
-- `contention`: `share = min(a,b) / mix_bb[w]`, in dB skaliert auf
-  `[contention_floor_db, -3 dB]`. `min(a,b)` ist bereits die streitende Energie,
+- `contention`: `share = min(a,b) / mix_bb[w]`, als dB-Wert. `min(a,b)` ist bereits die streitende Energie,
   `mix_bb` die Breitbandleistung des Paares im Fenster. Braucht kein
   Hoerbarkeits-Gate, weil `min(a,b)` die Arbeit selbst macht: eine Spur viel
   leiser, beide leise, oder eine allein laut ergeben jeweils einen kleinen Wert.
@@ -97,15 +100,46 @@ Pegelabstand ist dokumentierte Absicht und kostet gemessen rund ein Drittel der
 begrabenen Paare: jede verschwimmende Position, die `contention` verpasst hat,
 war ein begrabenes Paar (drei Faelle ueber beide Tests, keine Ausnahme).
 
+## Die Skala, repariert am 01.09.2026
+
+Der Mangel war notiert als "normiert gegen die theoretische Obergrenze statt
+gegen einen gemessenen Wert". Die Messung (`examples/masking_scale.py`, 51
+Beats) hat das umgedreht: **die Decke ist erreichbar.** Hoechste Zelle im
+ganzen Korpus -3.13 dB bei einer exakten Schranke von -3.01. Schuld war der
+Boden, `contention_floor_db = -30`, im Code selbst als unvalidierter Platzhalter
+markiert. Gemeldet wird nur zwischen -9.75 und -3.10 dB, ein Fenster von
+6.65 dB, normiert wurde ueber 27 dB. Die ganze Population sass deshalb im
+obersten Viertel: median 0.83, p99 0.96, alles ueber 0.75. Die 2.2 Prozent ueber
+0.95 waren genau das p99.
+
+Fix in zwei Teilen. Erstens entscheiden die Schwellen jetzt physikalisch in dB
+statt auf einer Anzeigeskala, damit eine Aenderung an der Anzeige die Erkennung
+nicht mehr anfassen kann und der C++-Port keine versteckte Abbildung erbt.
+Zweitens ist der Anzeigeboden die Meldeschwelle selbst: `Zone.score` normiert
+ueber `[contention_score_db, -3 dB]`. Eine Zone genau auf der Schwelle zeigt
+0.0, sie ist das Schwaechste, das noch gemeldet wird.
+
+Die Defaults -11.1 dB und -9.75 dB sind die exakten dB-Entsprechungen von
+`hit_min` 0.7 und `score_min` 0.75 auf der alten Skala. **Der Zonensatz ist
+damit unveraendert der aus Phase 0**, belegt per Werte-Diff und nicht per
+gruenem Test:
+
+- `examples/masking_zone_dump.py` vor und nach dem Umbau, 1222 Zonen,
+  0 Abweichungen in Spurpaar, Band, Frequenzgrenzen und Fenstergrenzen
+- Korpuslauf vor und nach: 5076 Paare, 0 Abweichungen in den Zonenzahlen,
+  Summary identisch, `relative` und `collision` in keinem einzigen Wert bewegt
+- bewegt haben sich exakt die 242 `contention`-Scores der gemeldeten Paare,
+  jeder auf 2e-6 genau auf dem vorhergesagten Umrechnungspfad
+
+Danach: median 0.32, p90 0.66, max 0.985. Eine Schwelle bei 0.5 greift die
+obersten 27.7 Prozent der Zonen, bei 0.75 die obersten 4.1 Prozent.
+
 ## Offene Maengel
 
-- Die Skala ist oben unbrauchbar. Nur 2.2 Prozent der Zonen liegen ueber 0.95,
-  weil gegen die theoretische Obergrenze -3 dB normiert wird statt gegen einen am
-  Korpus gemessenen Wert. Macht eine Anzeigeschwelle wertlos.
 - Ein gemeldetes Paar zerfaellt in median 4, maximal 44 Zonen. Das braucht ein
   Zusammenfassen vor der UI, nicht in ihr.
 
-Beides blockiert die Anzeige, nicht den C++-Port.
+Blockiert die Anzeige, nicht den C++-Port.
 
 ## Grenzen der Evidenz
 
@@ -116,9 +150,13 @@ Gesamtmix; das entspricht dem Produkt und nicht der Mischsituation.
 ## Status
 
 - Python-Prototyp, offline (`analyze()` auf ganzen Buffern, kein Block-State)
-- `hit_min` 0.7 und `score_min` 0.75 stammen aus `relative` und sind fuer
-  `contention` unvalidiert
+- Die Schwellen stammen der Hoehe nach immer noch aus `relative` (0.7 / 0.75,
+  umgerechnet in -11.1 dB / -9.75 dB) und sind fuer `contention` als *Hoehe*
+  unvalidiert. Was validiert ist, ist der Zonensatz, den sie erzeugen: genau
+  den hat Hoertest 2 beurteilt.
 - Skripte: `examples/masking_sweep.py` (Positivkontrolle),
-  `examples/masking_corpus.py` (Negativkontrolle in Serie), die beiden
-  Listenpack-Renderer fuer die Hoertests
-- C++-Promotion erst nach den zwei offenen Maengeln
+  `examples/masking_corpus.py` (Negativkontrolle in Serie),
+  `examples/masking_scale.py` (Verteilung der Skala),
+  `examples/masking_zone_dump.py` (Werte-Diff ueber alle Zonenfelder), die
+  beiden Listenpack-Renderer fuer die Hoertests
+- C++-Promotion erst nach dem offenen Mangel (Zonen-Fragmentierung)
