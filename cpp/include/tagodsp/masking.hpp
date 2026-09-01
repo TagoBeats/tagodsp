@@ -377,47 +377,78 @@ public:
 
     /// Band-power grid of one track, (nWindows x nBands), absolute power.
     Matrix bandPower(const std::vector<double>& x, int nWindows) const {
-        return aggregate(x, nWindows);
+        return foldFrames(framePower(x), nWindows);
     }
 
-    /// The number of windows a set of tracks spans. Depends only on the longest
-    /// track's frame count, so it costs no transform and can be answered before
-    /// any spectrum is computed.
-    int windowCount(const std::vector<Track>& tracks) const {
-        double maxTime = 0.0;
-        for (const Track& t : tracks) {
-            const std::size_t frames = stft_.frameCount(t.x.size());
-            if (frames > 0) {
-                const double last =
-                    static_cast<double>(frames - 1) * static_cast<double>(p_.hop) / p_.sr;
-                maxTime = std::max(maxTime, last);
-            }
+    /// Band power of one frame, bins summed inside a band, written into
+    /// `out[0, nBands)`. No window averaging yet.
+    void bandPowerFrame(const std::vector<double>& x, std::size_t f, double* out) const {
+        spectrumScratch_.resize(stft_.nBins());
+        stft_.powerSpectrumFrame(x, f, spectrumScratch_.data());
+        std::fill(out, out + p_.nBands, 0.0);
+        foldBins(spectrumScratch_.data(), out);
+    }
+
+    /// Per-frame band power of a signal, (frames x nBands).
+    ///
+    /// This is the representation a live caller wants to hold on to. A frame is
+    /// nBands doubles, 30 by default, against 2049 bins of spectrum and 1024
+    /// samples of audio per hop: about 10 KB per second of audio, so a whole
+    /// song is megabytes. Keeping this instead of the samples is what lets an
+    /// analysis follow playback without recomputing the past.
+    Matrix framePower(const std::vector<double>& x) const {
+        const std::size_t nFrames = stft_.frameCount(x.size());
+        Matrix out(nFrames, p_.nBands);
+        if (nFrames == 0) {
+            return out;
         }
+        spectrumScratch_.resize(stft_.nBins());
+        for (std::size_t f = 0; f < nFrames; ++f) {
+            stft_.powerSpectrumFrame(x, f, spectrumScratch_.data());
+            foldBins(spectrumScratch_.data(), &out.at(f, 0));
+        }
+        return out;
+    }
+
+    /// The number of windows a given frame count spans.
+    int windowCountForFrames(std::size_t frames) const {
+        const double maxTime =
+            frames > 0 ? static_cast<double>(frames - 1) * static_cast<double>(p_.hop) / p_.sr : 0.0;
         return std::max<int>(1,
                              static_cast<int>(detail::roundHalfEven(maxTime / p_.windowSeconds)));
     }
 
-    MaskingResult analyze(const std::vector<Track>& tracks) const {
+    /// Everything downstream of the transform, run on per-frame band power.
+    ///
+    /// A live caller keeps its own frame rows and calls this; analyze() builds
+    /// the rows first and then calls the same function, so there is one code
+    /// path from here on and no second way for the two to disagree.
+    MaskingResult analyzeFramePower(const std::vector<TrackGrid>& framePowers) const {
         MaskingResult result;
         result.bandEdgesHz = bandEdges();
         result.windowSeconds = p_.windowSeconds;
 
-        const int nWindows = windowCount(tracks);
+        std::size_t maxFrames = 0;
+        for (const TrackGrid& g : framePowers) {
+            maxFrames = std::max(maxFrames, g.grid.rows);
+        }
+        const int nWindows = windowCountForFrames(maxFrames);
         result.nWindows = nWindows;
 
-        for (std::size_t i = 0; i < tracks.size(); ++i) {
-            result.bandPower.push_back(TrackGrid{tracks[i].name, aggregate(tracks[i].x, nWindows)});
+        for (const TrackGrid& g : framePowers) {
+            result.bandPower.push_back(TrackGrid{g.name, foldFrames(g.grid, nWindows)});
         }
 
-        for (std::size_t i = 0; i < tracks.size(); ++i) {
-            for (std::size_t j = i + 1; j < tracks.size(); ++j) {
+        for (std::size_t i = 0; i < framePowers.size(); ++i) {
+            for (std::size_t j = i + 1; j < framePowers.size(); ++j) {
                 const Matrix& a = result.bandPower[i].grid;
                 const Matrix& b = result.bandPower[j].grid;
                 Matrix cell = contention(a, b);
                 std::vector<Zone> found =
-                    cluster(cell, result.bandEdgesHz, tracks[i].name, tracks[j].name);
+                    cluster(cell, result.bandEdgesHz, framePowers[i].name, framePowers[j].name);
                 result.zones.insert(result.zones.end(), found.begin(), found.end());
-                result.cells.push_back(PairGrid{tracks[i].name, tracks[j].name, std::move(cell)});
+                result.cells.push_back(
+                    PairGrid{framePowers[i].name, framePowers[j].name, std::move(cell)});
             }
         }
 
@@ -427,54 +458,52 @@ public:
         return result;
     }
 
+    MaskingResult analyze(const std::vector<Track>& tracks) const {
+        std::vector<TrackGrid> framePowers;
+        framePowers.reserve(tracks.size());
+        for (const Track& t : tracks) {
+            framePowers.push_back(TrackGrid{t.name, framePower(t.x)});
+        }
+        return analyzeFramePower(framePowers);
+    }
+
 private:
-    /// A signal folded straight into (nWindows x nBands): bins summed inside a
-    /// band, frames averaged inside a window. Windows no frame falls into stay
-    /// at zero, as do bands with no bins.
+    /// One spectrum's bins summed into bands, ascending bin order. Bands with no
+    /// bins stay at whatever the caller left in `out`, which is zero.
+    void foldBins(const double* spectrum, double* out) const {
+        for (std::size_t k = 0; k < binBand_.size(); ++k) {
+            const std::ptrdiff_t b = binBand_[k];
+            if (b >= 0 && b < static_cast<std::ptrdiff_t>(p_.nBands)) {
+                out[static_cast<std::size_t>(b)] += spectrum[k];
+            }
+        }
+    }
+
+    /// Per-frame band power (frames x nBands) folded into (nWindows x nBands),
+    /// frames averaged inside a window. Windows no frame falls into stay at
+    /// zero.
     ///
-    /// One frame is computed, folded and dropped before the next one starts, so
-    /// the (frames x bins) spectrum never exists as a whole. That is the entire
-    /// point: at n_fft 4096 a frame is 2049 doubles against 30 bands, so holding
-    /// the grid costs about seventy times what the result does, and it is what
-    /// put the analysis at 5.8 MB per second of audio.
-    ///
-    /// The arithmetic is unchanged, and deliberately so: bins are still summed
-    /// in ascending order inside a frame, frames still added in ascending order
-    /// inside a window, the division by the frame count still happens last.
-    /// Floating point addition is not associative, so any other order would move
-    /// the values in the last bits and the golden diff against Python would have
-    /// to be loosened to hide it.
-    Matrix aggregate(const std::vector<double>& x, int nWindows) const {
+    /// The arithmetic here is deliberately untouched from when this was one
+    /// function taking the full spectrum: frames are still added in ascending
+    /// order inside a window and the division by the frame count still happens
+    /// last. Floating point addition is not associative, so any other order
+    /// would move the values in the last bits and the golden diff against the
+    /// Python workbench would have to be loosened to hide it.
+    Matrix foldFrames(const Matrix& framePowers, int nWindows) const {
         Matrix out(static_cast<std::size_t>(nWindows), p_.nBands);
-        const std::size_t nFrames = stft_.frameCount(x.size());
-        if (nFrames == 0) {
+        if (framePowers.rows == 0) {
             return out;
         }
-
-        std::vector<double> spectrum(stft_.nBins());
-        std::vector<double> perFrame(p_.nBands);
         std::vector<int> counts(static_cast<std::size_t>(nWindows), 0);
-
-        for (std::size_t f = 0; f < nFrames; ++f) {
-            stft_.powerSpectrumFrame(x, f, spectrum.data());
-
-            std::fill(perFrame.begin(), perFrame.end(), 0.0);
-            for (std::size_t k = 0; k < binBand_.size(); ++k) {
-                const std::ptrdiff_t b = binBand_[k];
-                if (b >= 0 && b < static_cast<std::ptrdiff_t>(p_.nBands)) {
-                    perFrame[static_cast<std::size_t>(b)] += spectrum[k];
-                }
-            }
-
+        for (std::size_t f = 0; f < framePowers.rows; ++f) {
             const double t = static_cast<double>(f) * static_cast<double>(p_.hop) / p_.sr;
             const auto w = std::min<std::size_t>(static_cast<std::size_t>(t / p_.windowSeconds),
                                                  static_cast<std::size_t>(nWindows - 1));
             counts[w] += 1;
             for (std::size_t b = 0; b < p_.nBands; ++b) {
-                out.at(w, b) += perFrame[b];
+                out.at(w, b) += framePowers.at(f, b);
             }
         }
-
         for (std::size_t w = 0; w < out.rows; ++w) {
             if (counts[w] == 0) {
                 continue;
@@ -630,6 +659,10 @@ private:
 
     Params p_;
     Stft stft_;
+    /// Scratch, not state. Mutable for the same reason Stft holds its own: a
+    /// frame has to be computable through a const reference. One detector is
+    /// therefore not safe to share across threads.
+    mutable std::vector<double> spectrumScratch_;
     std::vector<double> bandEdges_;
     std::vector<std::ptrdiff_t> binBand_; ///< bin index -> band index, or out of range
 };
