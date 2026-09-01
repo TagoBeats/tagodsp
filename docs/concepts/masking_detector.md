@@ -184,9 +184,56 @@ Ein Hoerer, zwoelf Positionen pro Test, keine Wiederholungen, keine Statistik.
 Gerichtete Evidenz, kein Beweis. Gehoert wird immer nur das Spurpaar, nie der
 Gesamtmix; das entspricht dem Produkt und nicht der Mischsituation.
 
+## C++-Core, 01.09.2026
+
+Portiert nach `cpp/include/tagodsp/masking.hpp`, dazu `fft.hpp` (Radix-2
+Cooley-Tukey, damit die Library header-only und abhaengigkeitsfrei bleibt) und
+`stft.hpp` (nur Forward). Header-only, JUCE-frei, C++20.
+
+**Nur `contention` ist mitgekommen.** `relative` ist am 31.08. widerlegt worden
+und `collision` war der Zwischenkandidat; beide bleiben in der Python-Workbench,
+wo Kandidaten hingehoeren. Ein widerlegter Detektor im Produktkern waere nur ein
+zweiter Weg, falsch zu liegen.
+
+Verifiziert per Werte-Diff gegen die Python-Seite, nicht per gruenem Test:
+`examples/masking_golden.py` schreibt `cpp/tests/golden/masking.txt`,
+`cpp/tests/test_masking.cpp` baut dieselbe Fixture aus der Spec neu und
+vergleicht jede Stufe. Gemessene groesste Abweichung:
+
+| Stufe | Abweichung |
+| --- | --- |
+| STFT-Rohzeilen | 6.3e-16 vom Frame-Peak |
+| Band-Power-Gitter | 4.4e-16 vom Gitter-Peak |
+| `contention`-Zellen | 3.0e-11 dB absolut |
+| Zonen und Konflikte | identisch in Band, Fenster, Frequenzgrenzen, Score |
+
+Der Vergleich laeuft gegen eine Toleranz und nicht auf Bit-Gleichheit, weil
+beide Seiten `sin()` durch verschiedene Bibliotheken rechnen. Die Bezugsgroesse
+ist bewusst der lauteste Wert des Laufs und nicht der Wert der einzelnen Zelle:
+in einer spektralen Null steht der Rest einer fast vollstaendigen Ausloeschung,
+ein relativer Vergleich misst dort Rundungsrauschen statt Uebereinstimmung.
+Zonen- und Konfliktzahlen werden zusaetzlich exakt geprueft, denn eine Toleranz
+kann einen Wertedrift verdecken, aber keine gekippte Schwellenentscheidung.
+
+Die Fixture ist synthetisch und zwei Sekunden lang: zwei Spuren, die sich
+zeitlich zweimal ueberlappen und in zwei getrennten Frequenzregionen (um 260 Hz
+und um 980 Hz) streiten, plus eine Rauschspur, die schweigen muss. Ergebnis 4
+Zonen, 2 Konflikte, jeder aus zwei zeitlich getrennten Zonen. Damit laeuft der
+Frequenz-Merge der Zusammenfassungsschicht wirklich durch und wird nicht nur
+angenommen.
+
+Beide Konfliktregionen liegen mit Absicht deutlich ueber dem tiefen Ende. Bei
+`n_fft = 1024` und `sr = 16000` ist ein Bin 15.6 Hz breit, ein 70-Hz-Ton
+verschmiert seine Hauptkeule ueber drei log-verteilte Baender und keine der
+beiden Spuren streitet dort noch sauber mit der anderen. Das ist eine
+Eigenschaft der Fixture, nicht des Detektors, haette das Golden aber von
+Leakage statt vom getesteten Code abhaengig gemacht.
+
 ## Status
 
-- Python-Prototyp, offline (`analyze()` auf ganzen Buffern, kein Block-State)
+- Python-Prototyp, offline (`analyze()` auf ganzen Buffern, kein Block-State);
+  der C++-Core ist derselbe Offline-Schnitt. Der Umbau auf Block-State und
+  Hintergrund-Thread gehoert in den Plugin-Schritt, nicht in den Port.
 - Die Schwellen stammen der Hoehe nach immer noch aus `relative` (0.7 / 0.75,
   umgerechnet in -11.1 dB / -9.75 dB) und sind fuer `contention` als *Hoehe*
   unvalidiert. Was validiert ist, ist der Zonensatz, den sie erzeugen: genau
@@ -196,4 +243,4 @@ Gesamtmix; das entspricht dem Produkt und nicht der Mischsituation.
   `examples/masking_scale.py` (Verteilung der Skala),
   `examples/masking_zone_dump.py` (Werte-Diff ueber alle Zonenfelder), die
   beiden Listenpack-Renderer fuer die Hoertests
-- Keine offenen Anzeige-Maengel mehr; der C++-Port ist damit nicht mehr blockiert
+- Keine offenen Anzeige-Maengel mehr; der C++-Port ist gezogen, siehe oben
