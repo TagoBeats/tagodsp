@@ -15,9 +15,12 @@ Usage:
 """
 
 import argparse
+import sys
 from pathlib import Path
 
-import numpy as np
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+from reporting import markdown_table
+from testsignals import clipper_suite
 
 from tagodsp.analysis.true_peak import true_peak_db
 from tagodsp.distortion.adaa import ADAAClipper
@@ -33,24 +36,8 @@ SR = 44100
 # pass by sharing the blind spot of the instrument under test.
 VERIFY_OVERSAMPLE = 32
 
-
-def build_signals(sr: int, seconds: float) -> dict[str, np.ndarray]:
-    n = int(sr * seconds)
-    t = np.arange(n) / sr
-    rng = np.random.default_rng(2026)
-    burst = np.sin(2 * np.pi * 60.0 * t) * np.exp(-t * 12.0)
-    for hit in (0.25, 0.5, 0.75):
-        start = int(hit * n)
-        tail = np.arange(n - start) / sr
-        burst[start:] += np.sin(2 * np.pi * 3000.0 * tail) * np.exp(-tail * 60.0)
-    return {
-        "sine_1k": np.sin(2 * np.pi * 1000.0 * t),
-        "sine_5k": np.sin(2 * np.pi * 5000.0 * t),
-        "sine_11k": np.sin(2 * np.pi * 11000.0 * t),
-        "twotone_11k_12k": 0.5 * (np.sin(2 * np.pi * 11000 * t) + np.sin(2 * np.pi * 12000 * t)),
-        "drum_ish": burst / np.max(np.abs(burst)),
-        "noise": rng.standard_normal(n) * 0.25,
-    }
+# One instance, so the report quotes the margin the run actually used.
+_LIMITER = TruePeakLimiter(sr=SR, ceiling_db=CEILING_DB)
 
 
 # (label, builder) for the clipper stages under test
@@ -62,7 +49,7 @@ STAGES = (
 
 
 def run(sr: int, seconds: float) -> list[dict]:
-    signals = build_signals(sr, seconds)
+    signals = clipper_suite(sr, seconds)
     limiter = TruePeakLimiter(sr=sr, ceiling_db=CEILING_DB)
     rows = []
     for name, x in signals.items():
@@ -105,17 +92,33 @@ def summarise(rows: list[dict], sr: int, seconds: float) -> str:
         "",
         "## Ueberschreitungen der Decke",
         "",
-        "| Clipper-Stufe | ohne Limiter | mit Limiter | schlimmster Fall ohne | mit |",
-        "| :--- | :--- | :--- | :--- | :--- |",
     ]
+    per_stage = []
     for stage, _ in STAGES:
         sel = [r for r in rows if r["stage"] == stage]
         bare = [r["bare_db"] for r in sel]
         lim = [r["limited_db"] for r in sel]
-        lines.append(
-            f"| {stage} | **{over(bare)} von {len(sel)}** | **{over(lim)} von {len(sel)}** | "
-            f"{max(bare):+.2f} dBTP | {max(lim):+.2f} dBTP |"
+        per_stage.append(
+            {
+                "stage": stage,
+                "bare": f"**{over(bare)} von {len(sel)}**",
+                "limited": f"**{over(lim)} von {len(sel)}**",
+                "worst_bare": f"{max(bare):+.2f} dBTP",
+                "worst_limited": f"{max(lim):+.2f} dBTP",
+            }
         )
+    lines.append(
+        markdown_table(
+            per_stage,
+            [
+                ("stage", "Clipper-Stufe"),
+                ("bare", "ohne Limiter"),
+                ("limited", "mit Limiter"),
+                ("worst_bare", "schlimmster Fall ohne"),
+                ("worst_limited", "mit"),
+            ],
+        )
+    )
 
     worst = max(rows, key=lambda r: r["limited_db"])
     lines += [
@@ -128,7 +131,8 @@ def summarise(rows: list[dict], sr: int, seconds: float) -> str:
         "",
         f"Der Plan hatte 0,1 dB Schlupf ueber der Decke erlaubt, also {CEILING_DB + 0.1:+.1f} "
         "dBTP. Gefordert wird hier die schaerfere Fassung: kein Wert ueber der gesetzten Zahl. "
-        "Moeglich macht das der Sicherheitsabstand von 0,05 dB, siehe "
+        f"Moeglich macht das der Sicherheitsabstand von {_LIMITER.margin_db:.2f} dB, der dem "
+        f"Detektor mit {_LIMITER.oversample}x folgt, siehe "
         "`docs/concepts/true_peak_limiter.md`.",
     ]
     return "\n".join(lines) + "\n"

@@ -27,13 +27,10 @@ Concept note: docs/concepts/adaa_clipper.md
 from dataclasses import dataclass, field
 
 import numpy as np
-from scipy.signal import resample_poly
 
 from tagodsp.distortion.clipper import CURVES, FL_THRESHOLD_DEFAULT
 from tagodsp.utils.gain import db_to_lin
-
-# Same resampling window as distortion/clipper.py, so the two are comparable.
-_RESAMPLE_WINDOW = ("kaiser", 12.0)
+from tagodsp.utils.resampling import FACTORS, check_factor, downsample, upsample
 
 _LN2 = float(np.log(2.0))
 
@@ -109,8 +106,7 @@ class ADAAClipper:
             raise ValueError(
                 f"curve must be one of {sorted(ANTIDERIVATIVES)}, got {self.curve!r}"
             )
-        if self.oversample not in (1, 2, 4, 8, 16):
-            raise ValueError(f"oversample must be 1, 2, 4, 8 or 16, got {self.oversample}")
+        check_factor(self.oversample, FACTORS)
         if self.curve != "hard" and not 0.0 < self.threshold < 1.0:
             raise ValueError(f"threshold must be in (0, 1), got {self.threshold}")
         if self.eps <= 0.0:
@@ -123,13 +119,23 @@ class ADAAClipper:
         prev = np.concatenate(([x_prev], x[:-1]))
         delta = x - prev
 
+        # F1 over prev is F1 over x shifted by one sample, so evaluating it a
+        # second time would repeat work already done. Only the carried-over
+        # sample needs its own evaluation.
+        fx = f1(x, self.threshold)
+        fprev = np.concatenate((f1(np.array([x_prev]), self.threshold), fx[:-1]))
+
         # Guard the division itself, then discard those entries. Dividing by the
         # raw delta would raise a warning and produce inf before the where runs.
-        safe = np.where(np.abs(delta) < self.eps, 1.0, delta)
-        quotient = (f1(x, self.threshold) - f1(prev, self.threshold)) / safe
-        midpoint = f(0.5 * (x + prev), self.threshold)
+        small = np.abs(delta) < self.eps
+        safe = np.where(small, 1.0, delta)
+        y = (fx - fprev) / safe
 
-        y = np.where(np.abs(delta) < self.eps, midpoint, quotient)
+        # The midpoint branch runs on well under one percent of real material,
+        # so evaluating the curve over the whole buffer to then throw it away
+        # is the expensive way to spell it.
+        if small.any():
+            y[small] = f(0.5 * (x[small] + prev[small]), self.threshold)
         return y, float(x[-1])
 
     def process(self, x: np.ndarray) -> np.ndarray:
@@ -145,23 +151,10 @@ class ADAAClipper:
             y, self._x_prev = self._shape(driven, self._x_prev)
             return y
 
-        up = resample_poly(driven, self.oversample, 1, window=_RESAMPLE_WINDOW)
+        up = upsample(driven, self.oversample)
         shaped, self._x_prev = self._shape(up, self._x_prev)
-        down = resample_poly(shaped, 1, self.oversample, window=_RESAMPLE_WINDOW)
-        return down[: len(x)]
+        return downsample(shaped, self.oversample)[: len(x)]
 
     def reset(self) -> None:
         """Forget the previous sample, as if starting from silence."""
         self._x_prev = 0.0
-
-    def fallback_rate(self, x: np.ndarray) -> float:
-        """Fraction of samples that would take the midpoint branch.
-
-        Diagnostic for choosing eps: near-silent or low-frequency material sits
-        almost entirely in the fallback, which means ADAA does nothing there.
-        """
-        x = np.asarray(x, dtype=np.float64) * db_to_lin(self.drive_db)
-        if x.size == 0:
-            return 0.0
-        prev = np.concatenate(([self._x_prev], x[:-1]))
-        return float(np.mean(np.abs(x - prev) < self.eps))

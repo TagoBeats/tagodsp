@@ -17,14 +17,11 @@ Source: measurement report in ~/Documents/TagoClip/measure/analysis/REPORT.md
 """
 
 import numpy as np
-from scipy.signal import resample_poly
 
 from tagodsp.utils.gain import db_to_lin
+from tagodsp.utils.resampling import FACTORS, check_factor, downsample, upsample
 
 FL_THRESHOLD_DEFAULT = 100.0 / 128.0
-
-# Kaiser beta 12 gives roughly 115 dB stopband for the resampling filters.
-_RESAMPLE_WINDOW = ("kaiser", 12.0)
 
 
 def fl_softclip(x: np.ndarray, threshold: float = FL_THRESHOLD_DEFAULT) -> np.ndarray:
@@ -92,8 +89,7 @@ class Clipper:
     ):
         if curve not in CURVES:
             raise ValueError(f"curve must be one of {sorted(CURVES)}, got {curve!r}")
-        if oversample not in (1, 2, 4, 8, 16):
-            raise ValueError(f"oversample must be 1, 2, 4, 8 or 16, got {oversample}")
+        check_factor(oversample, FACTORS)
         self.curve = curve
         self.threshold = float(threshold)
         self.oversample = int(oversample)
@@ -104,10 +100,9 @@ class Clipper:
         shape = CURVES[self.curve]
         if self.oversample == 1:
             return shape(x, self.threshold)
-        up = resample_poly(x, self.oversample, 1, window=_RESAMPLE_WINDOW)
+        up = upsample(x, self.oversample)
         y = shape(up, self.threshold)
-        down = resample_poly(y, 1, self.oversample, window=_RESAMPLE_WINDOW)
-        return down[: len(x)]
+        return downsample(y, self.oversample)[: len(x)]
 
     def reset(self) -> None:
         """No state in the offline prototype."""

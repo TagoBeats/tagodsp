@@ -15,15 +15,27 @@ is what makes the bound provable rather than approximate.
 Concept note: docs/concepts/true_peak_limiter.md
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 from scipy.ndimage import minimum_filter1d
-from scipy.signal import resample_poly
 
 from tagodsp.utils.gain import db_to_lin
+from tagodsp.utils.resampling import check_factor, upsample
 
-_RESAMPLE_WINDOW = ("kaiser", 12.0)
+_VALID_OVERSAMPLE = (2, 4, 8, 16, 32)
+
+# How far under the ceiling to aim, per detector oversampling factor.
+#
+# The guarantee above holds for what the detector sees, and a detector with
+# finite oversampling does not see the maximum that falls between its own
+# support points. That blind spot is what the margin buys back, so it belongs
+# to the factor rather than being one constant for all of them. Measured on
+# clipped noise against a 32x meter, ceiling -1 dBTP, the excess left by a bare
+# detector was 0.52 dB at 2x, 0.23 at 4x, 0.08 at 8x and 0.02 at 16x, roughly a
+# quarter per doubling. These values carry about a factor of two of headroom on
+# that, which costs loudness nobody can hear.
+_SAFETY_DB = {2: 0.70, 4: 0.32, 8: 0.12, 16: 0.05, 32: 0.02}
 
 
 @dataclass
@@ -38,18 +50,22 @@ class TruePeakLimiter:
     ceiling_db: float = -1.0
     lookahead_ms: float = 1.5
     oversample: int = 16
-    safety_db: float = 0.05
-    _last_gain: np.ndarray | None = field(default=None, init=False, repr=False)
+    # None follows the detector, see _SAFETY_DB. Override only with a measurement.
+    safety_db: float | None = None
 
     def __post_init__(self) -> None:
-        if self.oversample not in (2, 4, 8, 16, 32):
-            raise ValueError(f"oversample must be 2, 4, 8, 16 or 32, got {self.oversample}")
+        check_factor(self.oversample, _VALID_OVERSAMPLE)
         if self.lookahead_ms <= 0.0:
             raise ValueError(f"lookahead_ms must be positive, got {self.lookahead_ms}")
         if self.sr <= 0.0:
             raise ValueError(f"sr must be positive, got {self.sr}")
-        if self.safety_db < 0.0:
+        if self.safety_db is not None and self.safety_db < 0.0:
             raise ValueError(f"safety_db must not be negative, got {self.safety_db}")
+
+    @property
+    def margin_db(self) -> float:
+        """The margin actually in use, whether chosen here or passed in."""
+        return _SAFETY_DB[self.oversample] if self.safety_db is None else self.safety_db
 
     @property
     def latency_samples(self) -> int:
@@ -61,27 +77,20 @@ class TruePeakLimiter:
         return max(n | 1, 3)
 
     def gain_envelope(self, x: np.ndarray) -> np.ndarray:
-        """The gain that will be applied, at the base rate. Exposed for plots."""
+        """The gain that process() will apply, at the base rate."""
         x = np.asarray(x, dtype=np.float64)
-        # Aim slightly under. A detector that oversamples by a finite factor
-        # always underestimates the true maximum, and a finer meter finds the
-        # rest: measured against a 32x meter, an 8x detector leaves 0.09 dB and
-        # a 16x detector 0.02 dB above the target. Matching the detector to our
-        # own meter would only be tuning to that one instrument, so the margin
-        # buys the promise instead, at a cost in loudness nobody can hear.
-        ceiling = db_to_lin(self.ceiling_db - self.safety_db)
+        ceiling = db_to_lin(self.ceiling_db - self.margin_db)
 
-        up = resample_poly(x, self.oversample, 1, axis=-1, window=_RESAMPLE_WINDOW)
+        up = upsample(x, self.oversample)
         loudest = np.max(np.abs(up), axis=0) if up.ndim > 1 else np.abs(up)
         required = np.minimum(1.0, ceiling / np.maximum(loudest, 1e-12))
 
         # Back to the base rate conservatively: the smallest gain any of the
         # oversampled positions asked for wins, so nothing in between is missed.
         n_base = x.shape[-1]
-        padded = np.pad(
-            required, (0, max(0, n_base * self.oversample - len(required))), mode="edge"
-        )[: n_base * self.oversample]
-        per_sample = padded.reshape(n_base, self.oversample).min(axis=1)
+        per_sample = required[: n_base * self.oversample].reshape(n_base, self.oversample).min(
+            axis=1
+        )
 
         window = self._window()
         envelope = minimum_filter1d(per_sample, size=window, mode="nearest")
@@ -98,9 +107,4 @@ class TruePeakLimiter:
             raise ValueError(f"x must be 1-D or 2-D, got {x.ndim}-D")
         if x.size == 0:
             return x.copy()
-        gain = self.gain_envelope(x)
-        self._last_gain = gain
-        return x * gain
-
-    def reset(self) -> None:
-        self._last_gain = None
+        return x * self.gain_envelope(x)

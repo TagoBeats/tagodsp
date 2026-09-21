@@ -16,4 +16,4 @@ Die erste Messung der Prototyp-Phase hatte gezeigt, dass der True Peak nach dem 
 
 -1.029 dBTP bei noise, Kurve fl, Threshold 0.50, Drive +6 dB, Stufe plain 1x.
 
-Der Plan hatte 0,1 dB Schlupf ueber der Decke erlaubt, also -0.9 dBTP. Gefordert wird hier die schaerfere Fassung: kein Wert ueber der gesetzten Zahl. Moeglich macht das der Sicherheitsabstand von 0,05 dB, siehe `docs/concepts/true_peak_limiter.md`.
+Der Plan hatte 0,1 dB Schlupf ueber der Decke erlaubt, also -0.9 dBTP. Gefordert wird hier die schaerfere Fassung: kein Wert ueber der gesetzten Zahl. Moeglich macht das der Sicherheitsabstand von 0.05 dB, der dem Detektor mit 16x folgt, siehe `docs/concepts/true_peak_limiter.md`.

@@ -9,71 +9,81 @@ reconstruction reaches 1.0 (0 dBTP).
 Method: oversample, then take the peak of the oversampled signal. BS.1770-4
 requires at least 4x. The default here is 16x because a 4x meter underestimates
 the true maximum when it falls between two of its support points; the error
-grows towards Nyquist. Resampling uses the same polyphase path as
-distortion/clipper.py (Kaiser beta 12, roughly 115 dB stopband) so that the
-measurement and the processing chain interpolate identically.
+grows towards Nyquist. Resampling goes through utils/resampling, the same path
+the processing chain uses, so measurement and processing interpolate alike.
 
 Source: ITU-R BS.1770-4, Annex 2 (true-peak level measurement).
 Concept note: docs/concepts/true_peak.md
 """
 
 import numpy as np
-from scipy.signal import resample_poly
 
-from tagodsp.utils.gain import DB_MIN, lin_to_db, peak_db
-
-# Same resampling window as distortion/clipper.py, on purpose.
-_RESAMPLE_WINDOW = ("kaiser", 12.0)
+from tagodsp.utils.gain import DB_MIN, lin_to_db
+from tagodsp.utils.resampling import FILTER_HALF_LEN, check_factor, upsample
 
 _VALID_OVERSAMPLE = (4, 8, 16, 32)
 
-# Input samples discarded at each end before taking the maximum. The resampler
+# Input samples discarded at each end before taking any maximum. The resampler
 # assumes silence outside the buffer, so its first and last output samples
 # reconstruct a step into the signal rather than the signal itself, and that
 # step rings: a sine at fs/4 measures +0.11 dBTP at the edges where the analytic
-# answer is exactly 0, while the interior lands on 1.0000006. scipy's filter
-# reaches 10 input samples, 16 covers it with margin.
+# answer is exactly 0, while the interior lands on 1.0000006.
 #
-# The cost is a blind spot of 16 samples (0.36 ms at 44.1 kHz) at each end of
-# the buffer. Buffers of 2*_EDGE_TRIM samples or shorter are measured whole and
-# may read high. Padding instead of trimming does not work: odd reflection is
-# only smooth for slowly varying signals and makes fs/4 content worse, not
-# better (measured +0.14 dB).
-_EDGE_TRIM = 16
+# The interpolation filter reaches FILTER_HALF_LEN input samples, so that is the
+# floor; the rest is margin. The cost is a blind spot of this many samples
+# (0.36 ms at 44.1 kHz) at each end. Shorter buffers are measured whole and may
+# read high. Padding instead of trimming does not work: odd reflection is only
+# smooth for slowly varying signals and makes fs/4 content worse, not better
+# (measured +0.14 dB), and scipy's own pad types reach +0.29 dB.
+_EDGE_TRIM = FILTER_HALF_LEN + 6
 
 
-def _measured_region(x: np.ndarray, factor: int) -> np.ndarray:
-    """Drop the resampler's transient zone at both ends, scaled by `factor`.
+def _views(x: np.ndarray, oversample: int) -> tuple[np.ndarray, np.ndarray]:
+    """The stretch that can honestly be measured, at both rates.
 
-    factor is 1 for the original rate and the oversampling ratio for the
-    upsampled signal, so both views cover the same stretch of time.
+    Returned together rather than trimmed twice by the caller, so the base-rate
+    and oversampled views cannot drift apart: comparing a peak taken over one
+    span with a peak taken over another is how an overshoot turns negative.
     """
-    if x.shape[-1] > 2 * _EDGE_TRIM * factor:
-        trim = _EDGE_TRIM * factor
-        return x[..., trim:-trim]
-    return x
-
-
-def true_peak(x: np.ndarray, oversample: int = 16) -> float:
-    """Linear true-peak amplitude of x, measured on an oversampled copy.
-
-    x is 1-D (mono) or 2-D with time along the last axis. Returns the maximum
-    absolute value across all channels, in linear amplitude.
-    """
-    if oversample not in _VALID_OVERSAMPLE:
-        raise ValueError(f"oversample must be one of {_VALID_OVERSAMPLE}, got {oversample}")
     x = np.asarray(x, dtype=np.float64)
     if x.ndim not in (1, 2):
         raise ValueError(f"x must be 1-D or 2-D, got {x.ndim}-D")
+    up = upsample(x, check_factor(oversample, _VALID_OVERSAMPLE))
+    if x.shape[-1] <= 2 * _EDGE_TRIM:
+        return x, up
+    trim = _EDGE_TRIM
+    return x[..., trim:-trim], up[..., trim * oversample : -trim * oversample]
+
+
+def peaks_db(
+    x: np.ndarray, oversample: int = 16, floor_db: float = DB_MIN
+) -> tuple[float, float]:
+    """Sample peak and true peak of the same stretch, in dB.
+
+    Both from one resampling pass, which is the expensive part.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    if x.size == 0:
+        return float(floor_db), float(floor_db)
+    base, up = _views(x, oversample)
+    sample_peak = float(np.max(np.abs(base))) if base.size else 0.0
+    return (
+        float(lin_to_db(sample_peak, floor_db=floor_db)),
+        float(lin_to_db(float(np.max(np.abs(up))), floor_db=floor_db)),
+    )
+
+
+def true_peak(x: np.ndarray, oversample: int = 16) -> float:
+    """Linear true-peak amplitude. 1-D, or 2-D with time on the last axis."""
+    x = np.asarray(x, dtype=np.float64)
     if x.size == 0:
         return 0.0
-    up = resample_poly(x, oversample, 1, axis=-1, window=_RESAMPLE_WINDOW)
-    return float(np.max(np.abs(_measured_region(up, oversample))))
+    return float(np.max(np.abs(_views(x, oversample)[1])))
 
 
 def true_peak_db(x: np.ndarray, oversample: int = 16, floor_db: float = DB_MIN) -> float:
     """True-peak level in dBTP."""
-    return float(lin_to_db(true_peak(x, oversample=oversample), floor_db=floor_db))
+    return peaks_db(x, oversample=oversample, floor_db=floor_db)[1]
 
 
 def isp_overshoot_db(x: np.ndarray, oversample: int = 16) -> float:
@@ -82,12 +92,9 @@ def isp_overshoot_db(x: np.ndarray, oversample: int = 16) -> float:
     Zero for signals whose reconstruction stays below the sampled maxima,
     positive whenever inter-sample peaks exist. This is the number that decides
     whether a clipper needs a true-peak-aware output stage.
-
-    Both peaks are taken over the same stretch of time: the sample peak also
-    ignores the edge samples that true_peak cannot measure, otherwise a peak
-    sitting in the trimmed zone would produce a negative overshoot.
     """
     x = np.asarray(x, dtype=np.float64)
     if x.size == 0 or not np.any(x):
         return 0.0
-    return true_peak_db(x, oversample=oversample) - peak_db(_measured_region(x, 1))
+    sample_peak_db, tp_db = peaks_db(x, oversample=oversample)
+    return tp_db - sample_peak_db

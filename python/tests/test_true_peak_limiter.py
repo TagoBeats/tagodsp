@@ -19,6 +19,29 @@ def verify_db(x: np.ndarray) -> float:
     return true_peak_db(x, oversample=VERIFY_OVERSAMPLE)
 
 
+def test_the_verification_meter_is_finer_than_the_detector():
+    # Everything below rests on this. If someone raises the limiter's default
+    # detector to match, the checks would quietly share its blind spot and pass
+    # by agreeing with the instrument under test.
+    assert VERIFY_OVERSAMPLE > TruePeakLimiter(sr=SR).oversample
+
+
+@pytest.mark.parametrize("oversample", [2, 4, 8, 16])
+def test_every_detector_setting_holds_the_ceiling(oversample):
+    # The margin has to follow the detector, because a coarser one misses more
+    # between its own support points. A single constant held only for the
+    # default and let 2x through by half a dB.
+    rng = np.random.default_rng(99)
+    limiter = TruePeakLimiter(sr=SR, ceiling_db=-1.0, oversample=oversample)
+    worst = -np.inf
+    for _ in range(40):
+        x = Clipper(curve="hard", threshold=1.0, oversample=1).process(
+            rng.standard_normal(4096) * rng.uniform(1.0, 6.0)
+        )
+        worst = max(worst, verify_db(limiter.process(x)))
+    assert worst <= -1.0, f"{oversample}x left {worst:.3f} dBTP"
+
+
 def _sine(freq: float, amp: float = 1.0, n: int = 2**14, sr: int = SR, phase: float = 0.0):
     return amp * np.sin(2 * np.pi * freq * np.arange(n) / sr + phase)
 

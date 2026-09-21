@@ -152,13 +152,6 @@ def test_reset_clears_the_carried_sample():
     assert np.array_equal(clip.process(x), first)
 
 
-def test_fallback_rate_reports_the_ill_conditioned_share():
-    quiet = ADAAClipper(curve="fl", threshold=0.5, eps=1e-3)
-    assert quiet.fallback_rate(_sine(20.0, amp=1e-4, n=4096)) > 0.9
-    loud = ADAAClipper(curve="fl", threshold=0.5, eps=1e-9)
-    assert loud.fallback_rate(_sine(5000.0, n=4096)) < 0.01
-
-
 @pytest.mark.parametrize("name", CURVE_NAMES)
 def test_the_two_branches_meet_where_they_swap(name):
     # The fallback only helps if nothing jumps when it takes over. Checked in

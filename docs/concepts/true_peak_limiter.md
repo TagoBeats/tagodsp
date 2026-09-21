@@ -74,7 +74,21 @@ vermutet, sondern schlicht Detektor-Aufloesung.
 
 Den Detektor genau so fein zu machen wie das eigene Messgeraet waere eine
 Optimierung auf genau dieses eine Instrument. Ein feineres Meter findet danach
-wieder etwas. Deshalb zielt der Limiter um `safety_db` **unter** die gesetzte
-Decke, per Default 0,05 dB. Das kostet Lautheit, die niemand hoert, und kauft
-dafuer die Zusage: die Zahl am Regler wird auch von einem feineren Messgeraet
-nicht ueberschritten.
+wieder etwas. Deshalb zielt der Limiter **unter** die gesetzte Decke.
+
+**Der Abstand folgt dem Detektor, er ist keine Konstante.** Der Fehler oben
+haengt am Oversampling-Faktor, also muss der Ausgleich das auch. Ein fester
+Wert hielt die Zusage nur fuer den Default und liess `oversample = 2` um eine
+halbe dB durch, ohne dass ein Test das gemerkt haette:
+
+| Detektor | Abstand | schlimmster Fall, 200 Signale gegen ein 32x-Meter |
+| :--- | :--- | :--- |
+| 2x | 0,70 dB | -1,26 dBTP |
+| 4x | 0,32 dB | -1,05 dBTP |
+| 8x | 0,12 dB | -1,04 dBTP |
+| 16x | 0,05 dB | -1,03 dBTP |
+| 32x | 0,02 dB | -1,02 dBTP |
+
+Das kostet Lautheit, die niemand hoert, und kauft dafuer die Zusage: die Zahl
+am Regler wird auch von einem feineren Messgeraet nicht ueberschritten.
+`safety_db` bleibt ueberschreibbar, aber nur gegen eine eigene Messung.

@@ -34,13 +34,10 @@ def _spectrum(x: np.ndarray) -> np.ndarray:
     return np.abs(np.fft.rfft(x * w)) ** 2
 
 
-def _bins_near(freqs: np.ndarray, target: float, tol_bins: int) -> np.ndarray:
-    """Boolean mask of the bins within tol_bins of target."""
-    idx = int(np.argmin(np.abs(freqs - target)))
-    mask = np.zeros(freqs.shape, dtype=bool)
-    lo = max(idx - tol_bins, 0)
-    mask[lo : idx + tol_bins + 1] = True
-    return mask
+def _band(n_bins: int, hz_per_bin: float, target: float, tol_bins: int) -> slice:
+    """The bins within tol_bins of target, as a slice into an rfft spectrum."""
+    idx = int(round(target / hz_per_bin))
+    return slice(max(idx - tol_bins, 0), min(idx + tol_bins + 1, n_bins))
 
 
 def alias_nmr_db(y: np.ndarray, sr: int, f0: float, tol_bins: int = _TOL_BINS) -> float:
@@ -50,17 +47,20 @@ def alias_nmr_db(y: np.ndarray, sr: int, f0: float, tol_bins: int = _TOL_BINS) -
     asymmetric nonlinearity can add an offset that is not aliasing.
     """
     power = _spectrum(y)
-    freqs = np.fft.rfftfreq(len(y), 1 / sr)
+    hz_per_bin = sr / len(y)
     nyquist = sr / 2
 
-    unwanted = np.ones(freqs.shape, dtype=bool)
-    unwanted &= ~_bins_near(freqs, 0.0, tol_bins)
+    # One mask, cleared in place per harmonic. Allocating a full boolean array
+    # per harmonic costs O(harmonics * N), which bites at low fundamentals: at
+    # 50 Hz that was 12.8 ms against 0.9 ms for the FFT itself.
+    unwanted = np.ones(len(power), dtype=bool)
+    unwanted[_band(len(power), hz_per_bin, 0.0, tol_bins)] = False
     k = 1
     while k * f0 < nyquist:
-        unwanted &= ~_bins_near(freqs, k * f0, tol_bins)
+        unwanted[_band(len(power), hz_per_bin, k * f0, tol_bins)] = False
         k += 1
 
-    fundamental = float(np.sum(power[_bins_near(freqs, f0, tol_bins)]))
+    fundamental = float(np.sum(power[_band(len(power), hz_per_bin, f0, tol_bins)]))
     if fundamental <= 0.0:
         raise ValueError("no energy at f0, cannot form a ratio")
     return float(10.0 * np.log10(np.sum(power[unwanted]) / fundamental + 1e-300))
@@ -69,6 +69,5 @@ def alias_nmr_db(y: np.ndarray, sr: int, f0: float, tol_bins: int = _TOL_BINS) -
 def harmonic_level_db(y: np.ndarray, sr: int, freq: float, tol_bins: int = _TOL_BINS) -> float:
     """Level of the spectral component at freq, relative to the strongest bin."""
     power = _spectrum(y)
-    freqs = np.fft.rfftfreq(len(y), 1 / sr)
-    band = float(np.sum(power[_bins_near(freqs, freq, tol_bins)]))
+    band = float(np.sum(power[_band(len(power), sr / len(y), freq, tol_bins)]))
     return float(10.0 * np.log10(band / np.max(power) + 1e-300))

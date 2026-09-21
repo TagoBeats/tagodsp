@@ -13,13 +13,18 @@ Usage:
 """
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+from reporting import markdown_table
+
 from tagodsp.analysis.alias_metrics import alias_nmr_db, harmonic_level_db
 from tagodsp.distortion.adaa import ADAAClipper
 from tagodsp.distortion.clipper import Clipper
+from tagodsp.utils.resampling import FILTER_HALF_LEN
 
 CURVES = ("fl", "hard", "tanh")
 FREQS = (1000.0, 5000.0, 11000.0)
@@ -39,13 +44,10 @@ CONFIGS = (
 SR = 44100
 N = 2**15
 
-# scipy's resample_poly builds a filter of 2*half*factor+1 taps with half=10,
-# which is exactly what TagoClip ships (81 taps at 4x, 161 at 8x).
-_FIR_HALF = 10
-
-
 def _taps(factor: int) -> int:
-    return 0 if factor == 1 else 2 * _FIR_HALF * factor + 1
+    """Filter length the shared resampler uses, 81 taps at 4x and 161 at 8x,
+    which is exactly what TagoClip ships."""
+    return 0 if factor == 1 else 2 * FILTER_HALF_LEN * factor + 1
 
 
 def cost_per_input_sample(factor: int) -> tuple[int, int]:
@@ -81,14 +83,6 @@ def run() -> list[dict]:
     return rows
 
 
-def _table(rows: list[dict], columns: list[str], header: list[str]) -> str:
-    out = ["| " + " | ".join(header) + " |", "| " + " | ".join([":---"] * len(header)) + " |"]
-    for r in rows:
-        cells = [f"{r[c]:+.2f}" if isinstance(r[c], float) else str(r[c]) for c in columns]
-        out.append("| " + " | ".join(cells) + " |")
-    return "\n".join(out)
-
-
 def summarise(rows: list[dict]) -> str:
     labels = [label for label, _ in CONFIGS]
 
@@ -119,10 +113,9 @@ def summarise(rows: list[dict]) -> str:
         row["alle"] = mean_for(label)
         per_config.append(row)
     lines.append(
-        _table(
+        markdown_table(
             per_config,
-            ["config", *CURVES, "alle"],
-            ["Konfiguration", *CURVES, "Mittel"],
+            [("config", "Konfiguration"), *[(c, c) for c in CURVES], ("alle", "Mittel")],
         )
     )
 
@@ -134,10 +127,12 @@ def summarise(rows: list[dict]) -> str:
             row[f"{freq / 1000:g}k"] = mean_for(label, freq=freq)
         per_freq.append(row)
     lines.append(
-        _table(
+        markdown_table(
             per_freq,
-            ["config", *[f"{f / 1000:g}k" for f in FREQS]],
-            ["Konfiguration", *[f"{f / 1000:g} kHz" for f in FREQS]],
+            [
+                ("config", "Konfiguration"),
+                *[(f"{f / 1000:g}k", f"{f / 1000:g} kHz") for f in FREQS],
+            ],
         )
     )
 
@@ -154,10 +149,14 @@ def summarise(rows: list[dict]) -> str:
             }
         )
     lines.append(
-        _table(
+        markdown_table(
             cost_rows,
-            ["config", "macs", "evals", "note"],
-            ["Konfiguration", "MACs Resampling", "Kennlinien-Auswertungen", "Anmerkung"],
+            [
+                ("config", "Konfiguration"),
+                ("macs", "MACs Resampling"),
+                ("evals", "Kennlinien-Auswertungen"),
+                ("note", "Anmerkung"),
+            ],
         )
     )
     lines += [
@@ -179,7 +178,10 @@ def summarise(rows: list[dict]) -> str:
             row[f"{factor}x"] = float(20 * np.log10(np.cos(np.pi * freq / (factor * SR))))
         rolloff.append(row)
     lines.append(
-        _table(rolloff, ["freq", "1x", "2x", "4x"], ["Frequenz", "ADAA 1x", "ADAA 2x", "ADAA 4x"])
+        markdown_table(
+            rolloff,
+            [("freq", "Frequenz"), ("1x", "ADAA 1x"), ("2x", "ADAA 2x"), ("4x", "ADAA 4x")],
+        )
     )
 
     lines += ["", "## Treue der 3. Harmonischen gegen plain 8x, 5 kHz bei +11 dB", ""]
@@ -203,7 +205,9 @@ def summarise(rows: list[dict]) -> str:
             row[f"{factor}x"] = val - ref
         h3.append(row)
     lines.append(
-        _table(h3, ["curve", "1x", "2x", "4x"], ["Kurve", "ADAA 1x", "ADAA 2x", "ADAA 4x"])
+        markdown_table(
+            h3, [("curve", "Kurve"), ("1x", "ADAA 1x"), ("2x", "ADAA 2x"), ("4x", "ADAA 4x")]
+        )
     )
 
     return "\n".join(lines) + "\n"
