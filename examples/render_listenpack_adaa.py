@@ -36,7 +36,7 @@ from render_listenpack_clipper import synth_808, synth_hats
 from tagodsp.analysis.alias_metrics import alias_nmr_db
 from tagodsp.distortion.adaa import ADAAClipper
 from tagodsp.distortion.clipper import Clipper
-from tagodsp.utils.gain import lin_to_db, rms
+from tagodsp.utils.gain import db_to_lin, lin_to_db, rms
 
 SR = 44100
 THRESHOLD = 67 / 128
@@ -79,16 +79,41 @@ def sine(freq: float, seconds: float = 3.0) -> np.ndarray:
     return x
 
 
-def plain(oversample: int, x: np.ndarray) -> np.ndarray:
-    return Clipper(
-        curve="fl", threshold=THRESHOLD, oversample=oversample, drive_db=DRIVE_DB
-    ).process(x)
+# Drive per case. Hot where a clipper actually gets used, moderate on a finished
+# master, because +11 dB into an already maximised mix is mush and nobody can
+# judge a subtle difference through it. Differences between the configurations
+# grow with drive, so the hot cases are the sensitive ones: indistinguishable
+# there means indistinguishable everywhere below.
+DRIVE_PER_CASE = {"master": 4.0}
 
 
-def adaa(oversample: int, x: np.ndarray) -> np.ndarray:
-    return ADAAClipper(
-        curve="fl", threshold=THRESHOLD, oversample=oversample, drive_db=DRIVE_DB
-    ).process(x)
+def drive_for(name: str) -> float:
+    return DRIVE_PER_CASE.get(name, DRIVE_DB)
+
+
+def _per_channel(make, x: np.ndarray) -> np.ndarray:
+    """Run a fresh processor over each channel. Time is the first axis."""
+    if x.ndim == 1:
+        return make().process(x)
+    return np.stack([make().process(x[:, ch]) for ch in range(x.shape[1])], axis=1)
+
+
+def plain(oversample: int, x: np.ndarray, drive_db: float = DRIVE_DB) -> np.ndarray:
+    return _per_channel(
+        lambda: Clipper(
+            curve="fl", threshold=THRESHOLD, oversample=oversample, drive_db=drive_db
+        ),
+        x,
+    )
+
+
+def adaa(oversample: int, x: np.ndarray, drive_db: float = DRIVE_DB) -> np.ndarray:
+    return _per_channel(
+        lambda: ADAAClipper(
+            curve="fl", threshold=THRESHOLD, oversample=oversample, drive_db=drive_db
+        ),
+        x,
+    )
 
 
 # (item suffix, A oversampling, A label, B oversampling, B label)
@@ -99,69 +124,151 @@ COMPARISONS = (
     ("adaa1x_vs_plain1x", 1, "plain_1x_wie_fl", 1, "adaa_1x"),
 )
 
+# Real stems: (case name, fragment of the file name). One beat so the four cases
+# stay musically coherent, and the fragments survive FL's project-name prefix.
+STEM_CASES = (
+    ("808", "PV3 808 4"),
+    ("drum_bus", "Drum Bus"),
+    ("hats", "hi hat"),
+    ("master", "Master"),
+)
+
+# Which comparison to render for which case, so the page stays clickable.
+# Everything gets the decision; the rolloff and the alias grit are checked where
+# they actually show up.
+FOCUS = {
+    "adaa4x_vs_plain8x": None,
+    "adaa2x_vs_plain8x": ("hats", "master"),
+    "adaa1x_vs_plain8x": ("hats", "master"),
+    "adaa1x_vs_plain1x": ("hats",),
+}
+
+
+def loudest_window(x: np.ndarray, sr: int, seconds: float) -> np.ndarray:
+    """The most energetic stretch, so the excerpt is not an intro or a gap."""
+    n = int(seconds * sr)
+    mono = x.mean(axis=1) if x.ndim > 1 else x
+    if len(mono) <= n:
+        return x
+    hop = max(int(0.25 * sr), 1)
+    energy = [(float(np.sum(mono[s : s + n] ** 2)), s) for s in range(0, len(mono) - n, hop)]
+    start = max(energy)[1]
+    return x[start : start + n]
+
+
+def load_stems(folder: Path, seconds: float) -> tuple[dict[str, np.ndarray], int]:
+    """Load the named stem cases, trimmed to their loudest window.
+
+    Each stem is peak normalised to -0.5 dBFS before the drive is applied,
+    otherwise a bus sitting at -30 dBFS RMS would never reach the knee and the
+    comparison would be between two untouched files.
+    """
+    import soundfile as sf
+
+    signals: dict[str, np.ndarray] = {}
+    sr_seen: set[int] = set()
+    for case, fragment in STEM_CASES:
+        matches = [p for p in sorted(folder.glob("*.wav")) if fragment.lower() in p.name.lower()]
+        if not matches:
+            print(f"  {case}: no file containing {fragment!r}, skipped")
+            continue
+        data, sr = sf.read(matches[0])
+        sr_seen.add(sr)
+        clip = loudest_window(data, sr, seconds)
+        peak = float(np.max(np.abs(clip)))
+        clip = clip / peak * 10 ** (-0.5 / 20) if peak > 0 else clip
+        signals[case] = clip
+        print(f"  {case}: {matches[0].name[:60]} at {sr} Hz")
+    if len(sr_seen) > 1:
+        raise SystemExit(f"stems have mixed sample rates: {sorted(sr_seen)}")
+    return signals, sr_seen.pop() if sr_seen else SR
+
+
+DEFAULT_STEMS = Path.home() / "Music/Beats 2026/okayes/okayes Stems"
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
-        "--audio",
+        "--stems-dir",
         type=Path,
-        default=None,
-        help="optional real-world wav to run through the same comparisons",
+        default=DEFAULT_STEMS,
+        help="folder of real stems; falls back to synthetic material if missing",
+    )
+    parser.add_argument(
+        "--seconds", type=float, default=10.0, help="excerpt length per stem"
     )
     args = parser.parse_args()
 
-    signals = {
-        "drums": drums(),
-        "hats": synth_hats(),
-        "bright_noise": bright_noise(),
-        "sine_5k": sine(5000.0),
-        "sine_11k": sine(11000.0),
-    }
+    if args.stems_dir.is_dir():
+        print(f"Stems aus {args.stems_dir}")
+        signals, sr = load_stems(args.stems_dir, args.seconds)
+        tone_checks: tuple[tuple[str, float], ...] = ()
+    else:
+        print(f"{args.stems_dir} nicht gefunden, synthetisches Material")
+        sr = SR
+        signals = {
+            "drums": drums(),
+            "hats": synth_hats(),
+            "bright_noise": bright_noise(),
+            "sine_5k": sine(5000.0),
+            "sine_11k": sine(11000.0),
+        }
+        tone_checks = (("sine_5k", 5000.0), ("sine_11k", 11000.0))
 
-    if args.audio is not None:
-        import soundfile as sf
+    if not signals:
+        raise SystemExit("no material to render")
 
-        data, sr_in = sf.read(args.audio)
-        if sr_in != SR:
-            raise SystemExit(f"{args.audio} is at {sr_in} Hz, expected {SR}")
-        mono = data[:, 0] if data.ndim > 1 else data
-        signals[args.audio.stem[:20]] = mono[: 8 * SR] / max(np.max(np.abs(mono)), 1e-12) * 0.9
+    print()
+    print("Wie hart greift der Clipper an? Reduktion gegen das reine Anheben um den Drive:")
+    for name, x in signals.items():
+        d = drive_for(name)
+        driven_only = rms(x) * db_to_lin(d)
+        reduction = rms(plain(8, x, d)) / max(driven_only, 1e-12)
+        print(f"  {name:<12} Drive +{d:>4.1f} dB  ->  {lin_to_db(reduction):+6.2f} dB geclippt")
 
     pack = ListenPack("adaa")
-    print(f"{'Vergleich':<34} {'Signal':<14} {'Pegelabgleich':>14}")
+    print()
+    print(f"{'Vergleich':<22} {'Signal':<12} {'Pegelabgleich':>14}")
     for suffix, plain_os, label_a, adaa_os, label_b in COMPARISONS:
+        only = FOCUS.get(suffix)
         for name, x in signals.items():
-            a = plain(plain_os, x)
-            b_raw = adaa(adaa_os, x)
-            b, gain_db = match_rms(a, b_raw)
-            pack.add_pair(f"{name}_{suffix}", a, b, SR, label_a=label_a, label_b=label_b)
-            print(f"{suffix:<34} {name:<14} {gain_db:>+13.2f} dB")
+            if only is not None and name not in only:
+                continue
+            d = drive_for(name)
+            a = plain(plain_os, x, d)
+            b, gain_db = match_rms(a, adaa(adaa_os, x, d))
+            pack.add_pair(f"{name}_{suffix}", a, b, sr, label_a=label_a, label_b=label_b)
+            print(f"{suffix:<22} {name:<12} {gain_db:>+13.2f} dB")
 
     for name, x in signals.items():
+        mono = x.mean(axis=1) if x.ndim > 1 else x
+        d = drive_for(name)
         pack.spectrum_plot(
             f"spectrum_{name}",
             {
-                "plain 1x (wie FL)": plain(1, x),
-                "plain 8x (heute)": plain(8, x),
-                "ADAA 1x": adaa(1, x),
-                "ADAA 4x (Kandidat)": adaa(4, x),
+                "plain 1x (wie FL)": plain(1, mono, d),
+                "plain 8x (heute)": plain(8, mono, d),
+                "ADAA 1x": adaa(1, mono, d),
+                "ADAA 4x (Kandidat)": adaa(4, mono, d),
             },
-            SR,
-            title=f"{name}, FL-Kurve bei +{DRIVE_DB:.0f} dB Drive",
+            sr,
+            title=f"{name}, FL-Kurve bei +{d:.0f} dB Drive",
         )
 
-    print()
-    print("Alias-Metrik der Testtoene, kleiner ist sauberer:")
-    for name, freq in (("sine_5k", 5000.0), ("sine_11k", 11000.0)):
-        x = signals[name]
-        values = {
-            "plain 1x": alias_nmr_db(plain(1, x), SR, freq),
-            "plain 8x": alias_nmr_db(plain(8, x), SR, freq),
-            "ADAA 1x": alias_nmr_db(adaa(1, x), SR, freq),
-            "ADAA 4x": alias_nmr_db(adaa(4, x), SR, freq),
-        }
-        joined = "  ".join(f"{k} {v:+.1f}" for k, v in values.items())
-        print(f"  {name}: {joined}")
+    if tone_checks:
+        print()
+        print("Alias-Metrik der Testtoene, kleiner ist sauberer:")
+        for name, freq in tone_checks:
+            x = signals[name]
+            values = {
+                "plain 1x": alias_nmr_db(plain(1, x), sr, freq),
+                "plain 8x": alias_nmr_db(plain(8, x), sr, freq),
+                "ADAA 1x": alias_nmr_db(adaa(1, x), sr, freq),
+                "ADAA 4x": alias_nmr_db(adaa(4, x), sr, freq),
+            }
+            joined = "  ".join(f"{k} {v:+.1f}" for k, v in values.items())
+            print(f"  {name}: {joined}")
 
     page = pack.audition_page(title="TagoClip Pro: ADAA gegen Oversampling")
     print()
