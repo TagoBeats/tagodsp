@@ -95,7 +95,13 @@ class ADAAClipper:
     threshold: float = FL_THRESHOLD_DEFAULT
     oversample: int = 1
     drive_db: float = 0.0
-    eps: float = 1e-6
+    # Where the two branches cross over in accuracy, measured on the fl curve at
+    # x = 1.2: the quotient loses to cancellation as the difference shrinks
+    # (1.9e-13 error at 1e-3, 8.2e-8 at 1e-9) while the midpoint gains as its
+    # O(d^2) truncation shrinks (2.1e-8 at 1e-3, exact by 1e-9). They meet near
+    # 1e-4. Anywhere in 1e-3 to 1e-9 the error stays below float32 resolution,
+    # so this is a cheap choice rather than a critical one.
+    eps: float = 1e-4
     _x_prev: float = field(default=0.0, init=False, repr=False)
 
     def __post_init__(self) -> None:

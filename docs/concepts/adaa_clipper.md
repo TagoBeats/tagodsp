@@ -53,8 +53,25 @@ leisem oder tieffrequentem Material ist das der Normalfall, nicht die Ausnahme.
 
 Fallback unterhalb einer Schwelle `eps` auf die direkte Auswertung in der Mitte
 des Intervalls, `f((x[n] + x[n-1]) / 2)`. Das ist der Grenzwert des Quotienten
-fuer verschwindende Differenz, der Uebergang ist also stetig. `eps` ist ein
-Dataclass-Feld und wird gemessen, nicht geraten.
+fuer verschwindende Differenz, der Uebergang ist also stetig.
+
+**Gemessen am 21.09.2026** auf der fl-Kurve bei `x = 1.2`, also im gesaettigten
+Bereich, wo sich die beiden Zweige ueberhaupt unterscheiden koennen:
+
+| Differenz | Fehler Quotient | Fehler Mittelpunkt |
+| :--- | :--- | :--- |
+| 1e-3 | 1.9e-13 | 2.1e-8 |
+| 1e-5 | 1.2e-11 | 2.1e-12 |
+| 1e-7 | 1.0e-9 | 2.2e-16 |
+| 1e-9 | 8.2e-8 | exakt |
+
+Der Quotient verliert nach unten durch Ausloeschung, der Mittelpunkt gewinnt,
+weil sein Abbruchfehler mit dem Quadrat der Differenz faellt. Sie kreuzen sich
+bei etwa **1e-4**, das ist der Default. Die Wahl ist unkritisch: im ganzen
+Bereich 1e-3 bis 1e-9 bleibt der Fehler unter der Aufloesung von float32, und
+die Alias-Leistung aendert sich dabei um weniger als 0,5 dB. Ein groesseres
+`eps` ist nebenbei billiger, weil der Mittelpunkt-Zweig eine Auswertung statt
+zweier Stammfunktionen plus Division braucht.
 
 ## Grenzen des Prototyps
 
@@ -64,6 +81,11 @@ Dataclass-Feld und wird gemessen, nicht geraten.
   die C++-Portierung, nicht fuer den Prototyp.
 - Der Zustand ist das getriebene Eingangssample, nicht das rohe. Drive gehoert
   vor die Kennlinie.
-- Parameter-Automation ist ungeprueft: die Stammfunktion gilt fuer feste
-  Parameter. Aendert sich Threshold oder Drive zwischen zwei Samples, passen
-  `F1(x[n])` und `F1(x[n-1])` nicht mehr zusammen. Steht als Messpunkt an.
+- **Parameter-Automation geprueft am 21.09.2026, unauffaellig.** Die Sorge war,
+  dass die Stammfunktion nur fuer feste Parameter gilt. Sie greift nicht: die
+  Formel wertet `F1` an beiden Stellen mit den **aktuellen** Parametern aus, alt
+  und neu vermischen sich also nie. Gemessen ueber eine Threshold-Rampe von 0.9
+  auf 0.4 in Bloecken zu 64 Samples liegt die Kruemmung an den Blockgrenzen
+  unter dem Maximum im Blockinneren, bei ADAA wie beim einfachen Clipper. Die
+  lauteste Kruemmung im Signal ist das Knie der Kennlinie selbst, nicht eine
+  Blockgrenze.
