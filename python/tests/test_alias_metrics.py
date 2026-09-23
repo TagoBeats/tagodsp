@@ -1,7 +1,11 @@
 import numpy as np
 import pytest
 
-from tagodsp.analysis.alias_metrics import alias_nmr_db, harmonic_level_db
+from tagodsp.analysis.alias_metrics import (
+    alias_nmr_db,
+    alias_to_harmonics_db,
+    harmonic_level_db,
+)
 from tagodsp.distortion.clipper import Clipper
 
 SR = 44100
@@ -55,3 +59,42 @@ def test_rejects_multichannel_and_silence():
         alias_nmr_db(np.zeros((2, N)), SR, 1000.0)
     with pytest.raises(ValueError):
         alias_nmr_db(np.zeros(N), SR, 1000.0)
+
+
+def test_a_clean_sine_has_no_unwanted_energy_by_either_metric():
+    # The answer that has to come out right before either number means
+    # anything: nothing but the fundamental is present, so the ratio floors.
+    x = _sine(1000.0)
+    assert alias_nmr_db(x, SR, 1000.0) < -100.0
+    assert alias_to_harmonics_db(x, SR, 1000.0) < -100.0
+
+
+def test_the_two_metrics_agree_where_the_fundamental_carries_the_output():
+    # For a clipper they are the same measurement, within a dB. That is why the
+    # older one was good enough until a folder showed up.
+    x = _sine(5000.0)
+    for curve in ("fl", "hard", "tanh"):
+        y = Clipper(curve=curve, threshold=67 / 128, oversample=4, drive_db=11.0).process(x)
+        assert abs(alias_nmr_db(y, SR, 5000.0) - alias_to_harmonics_db(y, SR, 5000.0)) < 1.0
+
+
+def test_the_fundamental_denominator_collapses_on_a_folder():
+    # The reason alias_to_harmonics_db exists. At +6 dB into the sine folder
+    # A/t hits 3.81, the first zero of J1, and the fundamental drops out while
+    # the output stays as loud and as folded as at +5.5 or +6.5 dB. Measured
+    # against the fundamental the curve therefore reports a spike that is the
+    # denominator and not the signal; measured against the harmonic series it
+    # rises smoothly with drive, which is what actually happens.
+    x = _sine(5000.0)
+    drives = (5.0, 6.0, 7.0)
+    shaped = [
+        Clipper(curve="sinefold", threshold=67 / 128, oversample=8, drive_db=d).process(x)
+        for d in drives
+    ]
+    by_fundamental = [alias_nmr_db(y, SR, 5000.0) for y in shaped]
+    by_harmonics = [alias_to_harmonics_db(y, SR, 5000.0) for y in shaped]
+
+    assert by_fundamental[1] > by_fundamental[0] + 15.0
+    assert by_fundamental[1] > by_fundamental[2] + 15.0
+    assert by_harmonics[0] < by_harmonics[1] < by_harmonics[2]
+    assert by_harmonics[2] - by_harmonics[0] < 10.0

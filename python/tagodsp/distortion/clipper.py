@@ -18,6 +18,7 @@ Source: measurement report in ~/Documents/TagoClip/measure/analysis/REPORT.md
 
 import numpy as np
 
+from tagodsp.distortion.folder import FOLD_CURVES
 from tagodsp.utils.gain import db_to_lin
 from tagodsp.utils.resampling import FACTORS, check_factor, downsample, upsample
 
@@ -64,7 +65,13 @@ CURVES = {
     "fl": fl_softclip,
     "hard": hardclip,
     "tanh": tanh_clip,
+    # Candidate curves under gate, see folder.py. They share the signal path and
+    # the parametrisation but not the "saturates towards the ceiling" property
+    # stated above: a folder comes back down instead.
+    **FOLD_CURVES,
 }
+
+CLIPPING_CURVES = ("fl", "hard", "tanh")
 
 
 class Clipper:

@@ -66,6 +66,40 @@ def alias_nmr_db(y: np.ndarray, sr: int, f0: float, tol_bins: int = _TOL_BINS) -
     return float(10.0 * np.log10(np.sum(power[unwanted]) / fundamental + 1e-300))
 
 
+def alias_to_harmonics_db(y: np.ndarray, sr: int, f0: float, tol_bins: int = _TOL_BINS) -> float:
+    """Unwanted energy relative to every harmonic together, not just the first.
+
+    Same numerator as alias_nmr_db, different denominator, and for the three
+    clipping curves the two agree to within a dB because their fundamental
+    carries almost all of the output energy at any drive.
+
+    A wavefolder breaks that assumption. Its fundamental follows a Bessel
+    function of the drive and passes through zero: measured on 2026-09-23 at
+    threshold 0.5234 and +6 dB, where A/t = 3.81 lands on the first zero of J1
+    and the fundamental drops 34 dB while the output stays exactly as loud.
+    Against a denominator that has collapsed, a perfectly clean folder reports
+    as filthy. This is the metric to compare curves with when one of them
+    folds; the other one stays for continuity with older reports.
+    """
+    power = _spectrum(y)
+    hz_per_bin = sr / len(y)
+    nyquist = sr / 2
+
+    unwanted = np.ones(len(power), dtype=bool)
+    unwanted[_band(len(power), hz_per_bin, 0.0, tol_bins)] = False
+    harmonic = 0.0
+    k = 1
+    while k * f0 < nyquist:
+        band = _band(len(power), hz_per_bin, k * f0, tol_bins)
+        harmonic += float(np.sum(power[band]))
+        unwanted[band] = False
+        k += 1
+
+    if harmonic <= 0.0:
+        raise ValueError("no energy in the harmonic series, cannot form a ratio")
+    return float(10.0 * np.log10(np.sum(power[unwanted]) / harmonic + 1e-300))
+
+
 def harmonic_level_db(y: np.ndarray, sr: int, freq: float, tol_bins: int = _TOL_BINS) -> float:
     """Level of the spectral component at freq, relative to the strongest bin."""
     power = _spectrum(y)

@@ -12,7 +12,9 @@ delay. Where the difference approaches zero the quotient loses its leading
 digits to cancellation, so below `eps` the curve is evaluated directly at the
 midpoint of the interval, which is the limit of the quotient.
 
-All three curves are odd, so F1 is even and is evaluated on |x|. With
+All three clipping curves are odd, so F1 is even and is evaluated on |x|. The
+fold candidates registered from folder.py are the exception and take signed x.
+With
 a = 1 - t and u = (|x| - t) / a, and F1 = x^2/2 below the knee:
 
     hard: t*|x| - t^2/2
@@ -29,6 +31,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from tagodsp.distortion.clipper import CURVES, FL_THRESHOLD_DEFAULT
+from tagodsp.distortion.folder import FOLD_ANTIDERIVATIVES
 from tagodsp.utils.gain import db_to_lin
 from tagodsp.utils.resampling import FACTORS, check_factor, downsample, upsample
 
@@ -75,6 +78,9 @@ ANTIDERIVATIVES = {
     "fl": antiderivative_fl,
     "hard": antiderivative_hard,
     "tanh": antiderivative_tanh,
+    # Candidate curves under gate. Their F1 is even only in the symmetric case,
+    # so unlike the three above it handles the sign itself.
+    **FOLD_ANTIDERIVATIVES,
 }
 
 
