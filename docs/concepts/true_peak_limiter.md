@@ -15,6 +15,10 @@ was ihr Regler verspricht.
 
 ## Aufbau, und warum die Reihenfolge nicht beliebig ist
 
+0. **Tiefpass**, 0.875x Nyquist, 255 Taps, Kaiser Beta 8, relativ zu Nyquist
+   definiert (also bei jeder Samplerate dieselben Taps). Gehoert zur Decke,
+   nicht davor: das Signal, das erkannt wird, ist dasselbe, das rauskommt.
+   Siehe "Der Fund vom 23./24.09.2026" unten, dieser Schritt ist der Fix.
 1. **Oversampeln**, damit die Zwischenwerte ueberhaupt sichtbar sind. Ein
    Detektor, der nur die Samples sieht, kann Inter-Sample-Peaks nicht kennen.
 2. **Benoetigte Verstaerkung je Sample**, `g_req = min(1, ceiling / |x|)`.
@@ -76,19 +80,40 @@ Den Detektor genau so fein zu machen wie das eigene Messgeraet waere eine
 Optimierung auf genau dieses eine Instrument. Ein feineres Meter findet danach
 wieder etwas. Deshalb zielt der Limiter **unter** die gesetzte Decke.
 
-**Der Abstand folgt dem Detektor, er ist keine Konstante.** Der Fehler oben
-haengt am Oversampling-Faktor, also muss der Ausgleich das auch. Ein fester
-Wert hielt die Zusage nur fuer den Default und liess `oversample = 2` um eine
-halbe dB durch, ohne dass ein Test das gemerkt haette:
+Die Tabelle, die hier stand (ein Abstand pro Oversampling-Faktor, 0,70 dB bis
+0,02 dB), war falsch. Sie wurde mit einem 32x-Meter gegengeprueft, das
+denselben Resampling-Filter benutzte wie der damalige Standard-Detektor
+(halbe Laenge 10, Beta 12) und deshalb dieselbe Schwaeche hatte: ein endlicher
+Filter mit Cutoff bei Nyquist liest Energie direkt unter Nyquist zu niedrig,
+egal wie stark man oversampelt, und ein laengerer Filter derselben Bauart
+konvergiert dabei viel zu langsam (256 Taps/Phase lasen bei der Nachmessung
+immer noch 0,21 dB zu hoch). Meter und Detektor haben sich also gegenseitig
+bestaetigt, nicht die Realitaet.
 
-| Detektor | Abstand | schlimmster Fall, 200 Signale gegen ein 32x-Meter |
-| :--- | :--- | :--- |
-| 2x | 0,70 dB | -1,26 dBTP |
-| 4x | 0,32 dB | -1,05 dBTP |
-| 8x | 0,12 dB | -1,04 dBTP |
-| 16x | 0,05 dB | -1,03 dBTP |
-| 32x | 0,02 dB | -1,02 dBTP |
+## Der Fund vom 23./24.09.2026
 
-Das kostet Lautheit, die niemand hoert, und kauft dafuer die Zusage: die Zahl
-am Regler wird auch von einem feineren Messgeraet nicht ueberschritten.
-`safety_db` bleibt ueberschreibbar, aber nur gegen eine eigene Messung.
+Gemessen mit einem idealen Meter (steiles Kaiser-14-Fenster, 32x, 512
+Taps/Phase, Raender ausgeschlossen): der 16x-Detektor ohne Tiefpass liess auf
+echten okayes-Stems bis zu **+1,04 dB** ueber der Decke durch, auf Rauschen bis
+zu **+3,4 dB**. Ein Oracle-Detektor (unendliche Aufloesung) zeigte: das Problem
+ist reine Detektor-Aufloesung nahe Nyquist, keine Seitenbandwirkung der
+zeitvariablen Verstaerkung.
+
+Der Fix ist der Tiefpass in Schritt 0 (0,875x Nyquist, 255 Taps, Kaiser Beta
+8) plus ein neu vermessener Detektor: 8x Oversampling, halbe Laenge 16 (32
+Taps/Phase), Kaiser Beta 8, Cutoff fest bei 1/Oversampling. Mit dem Tiefpass
+gibt es nahe Nyquist praktisch nichts mehr, was der Detektor verpassen
+koennte. Gemessene Rest-Ueberschreitung ohne Abstand: echtes Material
+<= +0,06 dB, Rauschen <= +0,095 dB, bei 44,1/48/96 kHz und Decken
+-0,1/-1,0/-3,0 dBTP.
+
+**Abstand, von Robin festgelegt: 0,2 dB.** Das ist der einzige Abstand, den
+diese Datei noch behauptet. Jede andere Kombination aus Oversampling,
+Detektor-Halblaenge und Beta hat keine Messung hinter sich und verlangt ein
+explizites `safety_db`, sonst wirft `margin_db` einen Fehler statt zu raten.
+
+Latenzkosten: der Tiefpass allein kostet 127 Samples Gruppenlaufzeit
+(sample­raten­unabhaengig, weil der Cutoff relativ zu Nyquist definiert ist,
+nicht in Hz). Zusammen mit Detektor-Interpolation, halbem Lookahead-Fenster
+und halbem Glaettungskernel liegt die Gesamtlatenz bei 48 kHz bei rund 197
+Samples, von Robin als ~200 Samples akzeptiert.
